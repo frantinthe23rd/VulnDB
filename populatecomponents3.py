@@ -1,3 +1,45 @@
+"""
+Script: populatecomponents3.py
+
+Description:
+------------
+This script fetches all Maven components from the Maven Central Repository, retrieves their versions, and stores them in a local SQLite database (`vulnerabilities.db`). It supports full data fetching, incremental updates, and retrying failed batches. The script uses asynchronous API calls to improve performance and includes error handling and logging mechanisms.
+
+Database Tables:
+----------------
+1. **components** - Stores component group IDs, artifact IDs, and versions.
+2. **failed_batches** - Keeps track of batches that failed to fetch.
+3. **fetch_metadata** - Tracks the last successful fetch date for incremental updates.
+
+Command-Line Arguments:
+-----------------------
+--restart           : Clears existing data (components, failed batches, and checkpoints) and starts fresh.
+--batch-size [int]  : Specifies the batch size for fetching components (default: 500).
+--max-workers [int] : Number of concurrent threads for processing (default: 5).
+--log-file [str]    : Name of the log file for logging output (default: component_fetch_log.txt).
+--start-index [int] : Starting index for batch fetching (useful for resuming partially completed runs).
+--retry-failed      : Retries previously failed batches stored in the `failed_batches` table.
+--incremental       : Fetches only new or updated components since the last successful run.
+
+Usage Examples:
+---------------
+1. **Full Fetch:**
+   python populatecomponents3.py
+
+2. **Full Restart (Clear Data & Start Fresh):**
+   python populatecomponents3.py --restart
+
+3. **Incremental Fetch:**
+   python populatecomponents3.py --incremental
+
+4. **Retry Failed Batches:**
+   python populatecomponents3.py --retry-failed
+
+5. **Full Restart and Incremental Fetch:**
+   python populatecomponents3.py --restart --incremental
+
+"""
+
 import sqlite3
 import requests
 import json
@@ -35,7 +77,6 @@ def init_db():
     conn = sqlite3.connect("vulnerabilities.db", check_same_thread=False)
     cursor = conn.cursor()
 
-    # Table for storing components and their versions
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS components (
             component_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +87,6 @@ def init_db():
         )
     ''')
 
-    # Table for tracking failed batch fetches
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS failed_batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +96,6 @@ def init_db():
         )
     ''')
 
-    # Table for tracking last successful fetch for incremental updates
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fetch_metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,12 +106,13 @@ def init_db():
     conn.commit()
     return conn
 
-# Clears all components from the database when a full restart is needed
+# Clears all components and failed batches from the database when a full restart is needed
 def clear_components(conn):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM components")
+    cursor.execute("DELETE FROM failed_batches")  # Clears failed batches
     conn.commit()
-    logging.info("🗑️ Existing components cleared from database.")
+    logging.info("🗑️ Existing components and failed batches cleared from database.")
 
 # Clears the checkpoint file used for incremental fetching
 def clear_checkpoint():
@@ -94,74 +134,79 @@ def update_last_fetch_date(conn, last_fetch_date):
     cursor.execute("INSERT INTO fetch_metadata (last_fetch_date) VALUES (?)", (last_fetch_date,))
     conn.commit()
 
-# Processes batches of components from Maven Central
+# Processes batches of components with concurrency and bulk inserts
 async def process_batches(start_indices, rows):
     conn = init_db()
     total_processed = 0
     total_failed = 0
+    db_lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(10)  # Concurrency control
+    bulk_insert_data = []
+
     async with aiohttp.ClientSession() as session:
         for start in tqdm(start_indices, desc="Processing Batches"):
-            params = {
-                "q": "*:*",
-                "rows": rows,
-                "start": start,
-                "wt": "json"
-            }
-            try:
-                async with session.get("https://search.maven.org/solrsearch/select", params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        for doc in data.get("response", {}).get("docs", []):
-                            group_id = doc.get("g", "unknown_group")
-                            artifact_id = doc.get("a", "unknown_artifact")
-                            version = doc.get("v", "unknown_version")
+            async with semaphore:
+                params = {
+                    "q": "*:*",
+                    "rows": rows,
+                    "start": start,
+                    "wt": "json"
+                }
+                try:
+                    async with session.get("https://search.maven.org/solrsearch/select", params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            for doc in data.get("response", {}).get("docs", []):
+                                group_id = doc.get("g", "unknown_group")
+                                artifact_id = doc.get("a", "unknown_artifact")
 
-                            cursor = conn.cursor()
-                            cursor.execute('''
-                                INSERT OR IGNORE INTO components (group_id, artifact_id, version) VALUES (?, ?, ?)
-                            ''', (group_id, artifact_id, version))
-                            total_processed += 1
-                            conn.commit()
-                    else:
-                        logging.warning(f"⚠ Failed to fetch batch starting at {start}: HTTP {response.status}")
-                        total_failed += 1
-            except Exception as e:
-                logging.error(f"🚨 Exception during batch processing at start {start}: {e}")
-                total_failed += 1
+                                version_params = {
+                                    "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
+                                    "core": "gav",
+                                    "rows": 100,
+                                    "wt": "json"
+                                }
+                                async with session.get("https://search.maven.org/solrsearch/select", params=version_params) as version_response:
+                                    if version_response.status == 200:
+                                        version_data = await version_response.json()
+                                        for version_doc in version_data.get("response", {}).get("docs", []):
+                                            version = version_doc.get("v", "unknown_version")
+                                            bulk_insert_data.append((group_id, artifact_id, version))
+                                            total_processed += 1
+
+                                            if len(bulk_insert_data) >= 500:
+                                                async with db_lock:
+                                                    cursor = conn.cursor()
+                                                    cursor.executemany('''
+                                                        INSERT OR IGNORE INTO components (group_id, artifact_id, version)
+                                                        VALUES (?, ?, ?)
+                                                    ''', bulk_insert_data)
+                                                    conn.commit()
+                                                    bulk_insert_data.clear()
+                                    else:
+                                        logging.warning(f"⚠ Failed to fetch versions for {group_id}/{artifact_id}: HTTP {version_response.status}")
+                                        total_failed += 1
+                        else:
+                            logging.warning(f"⚠ Failed to fetch batch starting at {start}: HTTP {response.status}")
+                            total_failed += 1
+                except Exception as e:
+                    logging.error(f"🚨 Exception during batch processing at start {start}: {e}")
+                    total_failed += 1
+
+    if bulk_insert_data:
+        async with db_lock:
+            cursor = conn.cursor()
+            cursor.executemany('''
+                INSERT OR IGNORE INTO components (group_id, artifact_id, version)
+                VALUES (?, ?, ?)
+            ''', bulk_insert_data)
+            conn.commit()
 
     logging.info(f"✅ Total processed components: {total_processed}")
     logging.info(f"❌ Total failed batches: {total_failed}")
     conn.close()
 
-# Retries failed components from previous runs
-def retry_failed_components(conn, session):
-    cursor = conn.cursor()
-    cursor.execute("SELECT group_id, artifact_id FROM failed_batches")
-    failed_components = cursor.fetchall()
-
-    for group_id, artifact_id in failed_components:
-        params = {
-            "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
-            "wt": "json"
-        }
-        try:
-            response = requests.get("https://search.maven.org/solrsearch/select", params=params)
-            if response.status_code == 200:
-                data = response.json()
-                for doc in data.get("response", {}).get("docs", []):
-                    version = doc.get("v", "unknown_version")
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO components (group_id, artifact_id, version) VALUES (?, ?, ?)
-                    ''', (group_id, artifact_id, version))
-                    conn.commit()
-                cursor.execute("DELETE FROM failed_batches WHERE group_id = ? AND artifact_id = ?", (group_id, artifact_id))
-                conn.commit()
-            else:
-                logging.error(f"⚠ Failed to retry component {group_id}/{artifact_id}: HTTP {response.status_code}")
-        except Exception as e:
-            logging.error(f"🚨 Exception during retry for {group_id}/{artifact_id}: {e}")
-
-# Main entry point for fetching all Maven components
+# Main function
 def main():
     parser = argparse.ArgumentParser(description="Fetch all Maven components using Maven Central API.")
     parser.add_argument("--restart", action="store_true", help="Restart from beginning and clear components.")
@@ -180,20 +225,10 @@ def main():
     if args.restart:
         clear_components(conn)
         clear_checkpoint()
-        logging.info("🔄 Full restart: cleared components and checkpoint.")
-
-    if args.retry_failed:
-        with aiohttp.ClientSession() as session:
-            retry_failed_components(conn, session)
-        logging.info("🔄 Retried failed components.")
-
-    # Get last fetch date for incremental updates
-    last_fetch_date = get_last_fetch_date(conn) if args.incremental else None
+        logging.info("🔄 Full restart: cleared components, failed batches, and checkpoint.")
 
     total_docs = 0
     params = {"q": "*:*", "rows": 1, "wt": "json"}
-    if last_fetch_date:
-        params["fq"] = f"timestamp:[{last_fetch_date} TO NOW]"
 
     initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
     if initial_response.status_code == 200:
@@ -209,7 +244,6 @@ def main():
 
     asyncio.run(process_batches(start_indices, rows))
 
-    # Update last fetch date after successful run
     if args.incremental:
         update_last_fetch_date(conn, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
@@ -217,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

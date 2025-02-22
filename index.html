@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vulnerability Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            background: url('images/background.png') no-repeat center center fixed;
+            background-size: cover;
+            color: #fff;
+            scroll-behavior: smooth;
+        }
+        .header {
+            background-color: rgba(0, 0, 0, 0.8);
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 1000;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #ffeb3b;
+        }
+        .nav-menu {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+        }
+        .nav-menu li {
+            margin: 0 15px;
+        }
+        .nav-menu a {
+            color: #fff;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .nav-menu a:hover {
+            text-decoration: underline;
+        }
+        h2 {
+            color: #ffeb3b;
+            padding-top: 80px;
+        }
+        .heatmap-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .csv-download {
+            margin-bottom: 10px;
+            text-align: right;
+        }
+        .csv-download a {
+            color: #ffeb3b;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .csv-download a:hover {
+            text-decoration: underline;
+        }
+        .heatmap-container a {
+            color: #ffeb3b;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 5px 10px;
+            border-radius: 4px;
+            text-decoration: none;
+        }
+        .heatmap-container a:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+        .heatmap-img {
+            max-width: 100%;
+            height: auto;
+            border: 3px solid #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        .table-container {
+            margin: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 8px;
+        }
+        table.dataTable {
+            width: 100% !important;
+            border-collapse: collapse;
+            background-color: #fff;
+            color: #000;
+        }
+        table.dataTable th, table.dataTable td {
+            padding: 10px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        table.dataTable th {
+            background-color: #2196f3;
+            color: #fff;
+        }
+        table.dataTable tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        .dataTables_length select {
+            background-color: #fff;
+            color: #000;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 4px;
+        }
+        .dataTables_length label {
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Vulnerability Dashboard</h1>
+        <ul class="nav-menu">
+            <li><a href="#">Home</a></li>
+            <li><a href="#summary">Summary</a></li>
+            <li><a href="#heatmap">Heatmap</a></li>
+            <li><a href="#detailed">Detailed Report</a></li>
+        </ul>
+    </div>
+
+    <div class="table-container" id="summary">
+        <h2>Summary Vulnerability Report</h2>
+        <div class="csv-download">
+            <a href="csv/vulnerability_summary.csv" download>Download Summary CSV</a>
+        </div>
+        <table id="summaryTable" class="display" style="width:100%">
+            <thead>
+                <tr>
+                    <th>Publisher</th>
+                    <th>Product</th>
+                    <th>Year Detected</th>
+                    <th>Num Vulnerable Versions</th>
+                    <th>Critical</th>
+                    <th>High</th>
+                    <th>Medium</th>
+                    <th>Low</th>
+                    <th>Total Vulnerabilities</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="heatmap-container" id="heatmap">
+        <h2>Vulnerability Heatmap</h2>
+        <img src="images/vulnerability_heatmap.png?ts=" alt="Vulnerability Heatmap" class="heatmap-img" id="heatmapImg">
+        <div><a href="images/vulnerability_heatmap.png" download>Download Heatmap</a></div>
+    </div>
+
+    <div class="table-container" id="detailed">
+        <h2>Detailed Vulnerability Report</h2>
+        <div class="csv-download">
+            <a href="csv/vulnerability_detailed.csv" download>Download Detailed CSV</a>
+        </div>
+        <table id="detailedTable" class="display" style="width:100%">
+            <thead>
+                <tr>
+                    <th>Publisher</th>
+                    <th>Product</th>
+                    <th>Version</th>
+                    <th>CVE</th>
+                    <th>CVSS Score</th>
+                    <th>Severity</th>
+                    <th>Published Date</th>
+                    <th>Year Detected</th>
+                    <th>Critical</th>
+                    <th>High</th>
+                    <th>Medium</th>
+                    <th>Low</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            // Add timestamp to force image refresh
+            var heatmapImg = document.getElementById('heatmapImg');
+            heatmapImg.src = 'images/vulnerability_heatmap.png?ts=' + new Date().getTime();
+
+            // Load Summary CSV and sort by Total Vulnerabilities
+            Papa.parse('csv/vulnerability_summary.csv', {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    $('#summaryTable').DataTable({
+                        data: results.data,
+                        order: [[8, 'desc']],
+                        columns: [
+                            { data: 'publisher', defaultContent: '' },
+                            { data: 'product', defaultContent: '' },
+                            { data: 'year_detected', defaultContent: '' },
+                            { data: 'num_vulnerable_versions', defaultContent: '' },
+                            { data: 'critical', defaultContent: '' },
+                            { data: 'high', defaultContent: '' },
+                            { data: 'medium', defaultContent: '' },
+                            { data: 'low', defaultContent: '' },
+                            { data: 'total_vulnerabilities', defaultContent: '' }
+                        ]
+                    });
+                }
+            });
+
+            // Load Detailed CSV
+            Papa.parse('csv/vulnerability_detailed.csv', {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    $('#detailedTable').DataTable({
+                        data: results.data,
+                        columns: [
+                            { data: 'publisher', defaultContent: '' },
+                            { data: 'product', defaultContent: '' },
+                            { data: 'version', defaultContent: '' },
+                            { data: 'cve', defaultContent: '' },
+                            { data: 'cvss_score', defaultContent: '' },
+                            { data: 'severity', defaultContent: '' },
+                            { data: 'published_date', defaultContent: '' },
+                            { data: 'year_detected', defaultContent: '' },
+                            { data: 'critical', defaultContent: '' },
+                            { data: 'high', defaultContent: '' },
+                            { data: 'medium', defaultContent: '' },
+                            { data: 'low', defaultContent: '' }
+                        ]
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+

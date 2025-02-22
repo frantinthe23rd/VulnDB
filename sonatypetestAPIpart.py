@@ -173,8 +173,12 @@ def main():
     args = parser.parse_args()
 
     setup_logging()
-    api_token = "77751202da5417497f9b5d261969b86a325c965a"
-    username = "REDACTED"
+
+    # Load configuration from file
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    api_token = config.get("api_token")
+    username = config.get("username")
 
     conn = init_db()
 

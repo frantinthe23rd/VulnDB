@@ -134,13 +134,39 @@ def update_last_fetch_date(conn, last_fetch_date):
     cursor.execute("INSERT INTO fetch_metadata (last_fetch_date) VALUES (?)", (last_fetch_date,))
     conn.commit()
 
+# Function to handle API calls with exponential backoff for 403 errors
+async def fetch_with_backoff(session, url, params, max_retries=10):
+    backoff = 1  # Initial backoff time in seconds
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; MyFetcherBot/1.0; +http://mydomain.com/bot)'
+    }
+    for attempt in range(max_retries):
+        async with session.get(url, params=params, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            elif response.status == 403:
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    wait_time = int(retry_after)
+                    logging.warning(f"🚫 403 Forbidden. Retry-After header found. Waiting {wait_time} seconds...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logging.warning(f"🚫 403 Forbidden. Attempt {attempt + 1}/{max_retries}. Retrying in {backoff} seconds...")
+                    await asyncio.sleep(backoff + random.uniform(0, 1))  # Add jitter
+                    backoff = min(backoff * 2, 60)  # Exponential backoff with a cap
+            else:
+                logging.error(f"⚠ Unexpected status code: {response.status}")
+                return None
+    logging.error("❌ Max retries reached for 403 errors.")
+    return None
+
 # Processes batches of components with concurrency and bulk inserts
 async def process_batches(start_indices, rows):
     conn = init_db()
     total_processed = 0
     total_failed = 0
     db_lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(10)  # Concurrency control
+    semaphore = asyncio.Semaphore(5)  # Reduced concurrency control
     bulk_insert_data = []
 
     async with aiohttp.ClientSession() as session:
@@ -152,45 +178,52 @@ async def process_batches(start_indices, rows):
                     "start": start,
                     "wt": "json"
                 }
-                try:
-                    async with session.get("https://search.maven.org/solrsearch/select", params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            for doc in data.get("response", {}).get("docs", []):
-                                group_id = doc.get("g", "unknown_group")
-                                artifact_id = doc.get("a", "unknown_artifact")
+                data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+                if data:
+                    for doc in data.get("response", {}).get("docs", []):
+                        group_id = doc.get("g", "unknown_group")
+                        artifact_id = doc.get("a", "unknown_artifact")
 
-                                version_params = {
-                                    "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
-                                    "core": "gav",
-                                    "rows": 100,
-                                    "wt": "json"
-                                }
-                                async with session.get("https://search.maven.org/solrsearch/select", params=version_params) as version_response:
-                                    if version_response.status == 200:
-                                        version_data = await version_response.json()
-                                        for version_doc in version_data.get("response", {}).get("docs", []):
-                                            version = version_doc.get("v", "unknown_version")
-                                            bulk_insert_data.append((group_id, artifact_id, version))
-                                            total_processed += 1
+                        version_params = {
+                            "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
+                            "core": "gav",
+                            "rows": 100,
+                            "wt": "json"
+                        }
+                        version_data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", version_params)
 
-                                            if len(bulk_insert_data) >= 500:
-                                                async with db_lock:
-                                                    cursor = conn.cursor()
-                                                    cursor.executemany('''
-                                                        INSERT OR IGNORE INTO components (group_id, artifact_id, version)
-                                                        VALUES (?, ?, ?)
-                                                    ''', bulk_insert_data)
-                                                    conn.commit()
-                                                    bulk_insert_data.clear()
-                                    else:
-                                        logging.warning(f"⚠ Failed to fetch versions for {group_id}/{artifact_id}: HTTP {version_response.status}")
-                                        total_failed += 1
+                        if version_data:
+                            for version_doc in version_data.get("response", {}).get("docs", []):
+                                version = version_doc.get("v", "unknown_version")
+                                bulk_insert_data.append((group_id, artifact_id, version))
+                                total_processed += 1
+
+                                if len(bulk_insert_data) >= 500:
+                                    async with db_lock:
+                                        cursor = conn.cursor()
+                                        cursor.executemany('''
+                                            INSERT OR IGNORE INTO components (group_id, artifact_id, version)
+                                            VALUES (?, ?, ?)
+                                        ''', bulk_insert_data)
+                                        conn.commit()
+                                        bulk_insert_data.clear()
                         else:
-                            logging.warning(f"⚠ Failed to fetch batch starting at {start}: HTTP {response.status}")
+                            async with db_lock:
+                                cursor = conn.cursor()
+                                cursor.execute('''
+                                    INSERT INTO failed_batches (group_id, artifact_id, reason)
+                                    VALUES (?, ?, ?)
+                                ''', (group_id, artifact_id, "Failed to fetch versions"))
+                                conn.commit()
                             total_failed += 1
-                except Exception as e:
-                    logging.error(f"🚨 Exception during batch processing at start {start}: {e}")
+                else:
+                    async with db_lock:
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                            INSERT INTO failed_batches (group_id, artifact_id, reason)
+                            VALUES (?, ?, ?)
+                        ''', ("unknown_group", "unknown_artifact", "Failed to fetch batch"))
+                        conn.commit()
                     total_failed += 1
 
     if bulk_insert_data:

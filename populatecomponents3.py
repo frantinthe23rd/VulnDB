@@ -36,7 +36,7 @@ Usage Examples:
    python populatecomponents3.py --retry-failed
 
 5. **Full Restart and Incremental Fetch:**
-   python populatecomponents3.py --restart --incremental
+   python.populatecomponents3.py --restart --incremental
 
 """
 
@@ -260,25 +260,38 @@ def main():
         clear_checkpoint()
         logging.info("🔄 Full restart: cleared components, failed batches, and checkpoint.")
 
-    total_docs = 0
-    params = {"q": "*:*", "rows": 1, "wt": "json"}
+    if args.retry_failed:
+        cursor = conn.cursor()
+        cursor.execute("SELECT group_id, artifact_id FROM failed_batches")
+        failed_batches = cursor.fetchall()
+        if not failed_batches:
+            logging.info("✅ No failed batches to retry.")
+            return
 
-    initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
-    if initial_response.status_code == 200:
-        total_docs = initial_response.json().get("response", {}).get("numFound", 0)
+        start_indices = [0]  # Dummy start index to process failed batches
+        rows = len(failed_batches)
+        coordinates = [f"pkg:maven/{g}/{a}@latest" for g, a in failed_batches]
+        asyncio.run(process_batches(start_indices, rows))
     else:
-        logging.error("⚠ Failed to get total number of components.")
-        return
+        total_docs = 0
+        params = {"q": "*:*", "rows": 1, "wt": "json"}
 
-    logging.info(f"📊 Total components to fetch: {total_docs}")
+        initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
+        if initial_response.status_code == 200:
+            total_docs = initial_response.json().get("response", {}).get("numFound", 0)
+        else:
+            logging.error("⚠ Failed to get total number of components.")
+            return
 
-    rows = args.batch_size
-    start_indices = list(range(args.start_index, total_docs, rows))
+        logging.info(f"📊 Total components to fetch: {total_docs}")
 
-    asyncio.run(process_batches(start_indices, rows))
+        rows = args.batch_size
+        start_indices = list(range(args.start_index, total_docs, rows))
 
-    if args.incremental:
-        update_last_fetch_date(conn, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        asyncio.run(process_batches(start_indices, rows))
+
+        if args.incremental:
+            update_last_fetch_date(conn, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
     logging.info("✅ All batches processed.")
 

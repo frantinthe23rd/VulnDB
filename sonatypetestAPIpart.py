@@ -127,6 +127,9 @@ class RateLimiter:
                 return
             await asyncio.sleep((1 - self.allowance) * (self.per / self.rate))
 
+# Global rate limiter instance
+global_rate_limiter = RateLimiter(rate=3, per=1)  # 3 requests per second
+
 # Dynamic Rate Limiting and Retry Logic
 async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limiter, retries=5, max_backoff=60):
     backoff = 1
@@ -141,7 +144,10 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     return await response.json()
                 elif response.status == 429:
                     retry_after = response.headers.get('Retry-After')
-                    wait_time = int(retry_after) if retry_after else backoff
+                    if retry_after:
+                        wait_time = int(retry_after)
+                    else:
+                        wait_time = backoff
                     logging.warning(f"⚠ 429 Too Many Requests - Retrying in {wait_time} seconds...")
                     await asyncio.sleep(wait_time + random.uniform(0.5, 2.0))
                     backoff = min(backoff * 2, max_backoff)
@@ -154,7 +160,7 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     break
         except Exception as e:
             logging.error(f"🚨 Exception during API call: {str(e)}")
-            await asyncio.sleep(backoff)
+            await asyncio.sleep(backoff + random.uniform(0.5, 2.0))
             backoff = min(backoff * 2, max_backoff)
     return []
 
@@ -166,7 +172,6 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         encoded_token = b64encode(token.encode()).decode()
         headers["Authorization"] = f"Basic {encoded_token}"
 
-    rate_limiter = RateLimiter(rate=10, per=1)  # 10 requests per second
     batch_size = 50
     failed_batches = []
 
@@ -187,13 +192,13 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         for i in tqdm(range(start_index, len(coordinates), batch_size), desc="Fetching Vulnerabilities"):
             batch = coordinates[i:i + batch_size]
             payload = {"coordinates": batch}
-            vulnerabilities = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, rate_limiter)
+            vulnerabilities = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
 
             if not vulnerabilities:
                 logging.warning(f"⚠ Retrying batch with reduced size.")
                 for component in batch:
                     payload = {"coordinates": [component]}
-                    component_vulns = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, rate_limiter)
+                    component_vulns = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
                     if component_vulns:
                         vulnerabilities.extend(component_vulns)
                     else:

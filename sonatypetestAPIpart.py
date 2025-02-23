@@ -23,13 +23,13 @@ Database Tables:
 1. **components** - Stores component details (group ID, artifact ID, version).
 2. **vulnerabilities** - Stores vulnerability data (CVE, CVSS score, severity, etc.).
 
-Command-Line Arguments:
+Command-Line Arguments :
 -----------------------
 --restart           : Clears existing vulnerabilities and restarts the fetching process.
 --incremental       : Performs an incremental update to avoid duplicates and fetch new vulnerabilities.
 --retry_failed      : Retries previously failed API calls stored in 'failed_batches.json'.
 
-Usage Examples:
+Usage Examples: 
 ---------------
 1. **Full Fetch:**
    python sonatypetestAPIpart.py
@@ -128,11 +128,11 @@ class RateLimiter:
             await asyncio.sleep((1 - self.allowance) * (self.per / self.rate))
 
 # Global rate limiter instance
-global_rate_limiter = RateLimiter(rate=3, per=1)  # 3 requests per second
+global_rate_limiter = RateLimiter(rate=1, per=10)  # Increased to 1 request every 10 seconds
 
-# Dynamic Rate Limiting and Retry Logic
-async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limiter, retries=5, max_backoff=60):
-    backoff = 1
+# Dynamic Rate Limiting and Retry Logic with Jitter
+async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limiter, retries=5, max_backoff=600):
+    backoff = 2
     for attempt in range(retries):
         await rate_limiter.acquire()
         try:
@@ -147,12 +147,16 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     if retry_after:
                         wait_time = int(retry_after)
                     else:
-                        wait_time = backoff
-                    logging.warning(f"⚠ 429 Too Many Requests - Retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time + random.uniform(0.5, 2.0))
-                    backoff = min(backoff * 2, max_backoff)
+                        wait_time = 180  # 3 minutes
+                    logging.warning(f"⚠ 429 Too Many Requests - Pausing all threads for {wait_time} seconds...")
+                    await asyncio.sleep(wait_time)
+                    logging.info("🔄 Retrying after pause...")
+                    await session.close()  # Close the current session
+                    session = aiohttp.ClientSession()  # Create a new session
+                    backoff = min(backoff * 2, max_backoff)  # Exponential backoff
+                    continue  # Retry the same request after the pause
                 elif rate_limit_remaining is not None and int(rate_limit_remaining) < 5:
-                    reset_time = int(rate_limit_reset) - int(time.time()) if rate_limit_reset else 10
+                    reset_time = int(rate_limit_reset) - int(time.time()) if rate_limit_reset else 20
                     logging.warning(f"⚠ Approaching API rate limit, waiting for {reset_time} seconds.")
                     await asyncio.sleep(reset_time)
                 else:
@@ -160,7 +164,8 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     break
         except Exception as e:
             logging.error(f"🚨 Exception during API call: {str(e)}")
-            await asyncio.sleep(backoff + random.uniform(0.5, 2.0))
+            jitter = random.uniform(1.0, 3.0)
+            await asyncio.sleep(backoff + jitter)
             backoff = min(backoff * 2, max_backoff)
     return []
 
@@ -172,7 +177,7 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         encoded_token = b64encode(token.encode()).decode()
         headers["Authorization"] = f"Basic {encoded_token}"
 
-    batch_size = 50
+    batch_size = 128
     failed_batches = []
 
     checkpoint_file = "checkpoint_vulnerabilities.json"
@@ -243,7 +248,7 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
             with open(checkpoint_file, "w") as f:
                 json.dump({"last_index": i + batch_size}, f)
 
-            await asyncio.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(10, 20))  # Increased delay between batches
 
     if failed_batches:
         with open("failed_batches.json", "w") as f:

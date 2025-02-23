@@ -141,10 +141,10 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                 rate_limit_reset = response.headers.get('X-RateLimit-Reset')
 
                 if response.status == 200:
-                    return await response.json()
+                    return await response.json(), session
                 elif response.status == 429:
                     retry_after = response.headers.get('Retry-After')
-                    if retry_after:
+                    if (retry_after):
                         wait_time = int(retry_after)
                     else:
                         wait_time = 180  # 3 minutes
@@ -167,7 +167,7 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
             jitter = random.uniform(1.0, 3.0)
             await asyncio.sleep(backoff + jitter)
             backoff = min(backoff * 2, max_backoff)
-    return []
+    return [], session
 
 # Process vulnerabilities with smarter batch handling
 async def process_vulnerabilities(coordinates, conn, username, api_token, incremental=False, retry_failed=False):
@@ -197,13 +197,13 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         for i in tqdm(range(start_index, len(coordinates), batch_size), desc="Fetching Vulnerabilities"):
             batch = coordinates[i:i + batch_size]
             payload = {"coordinates": batch}
-            vulnerabilities = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+            vulnerabilities, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
 
             if not vulnerabilities:
                 logging.warning(f"⚠ Retrying batch with reduced size.")
                 for component in batch:
                     payload = {"coordinates": [component]}
-                    component_vulns = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+                    component_vulns, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
                     if component_vulns:
                         vulnerabilities.extend(component_vulns)
                     else:

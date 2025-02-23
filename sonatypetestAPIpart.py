@@ -1,3 +1,41 @@
+"""
+Script: sonatypetestAPIpart.py
+
+Description:
+------------
+This script fetches vulnerability data for Maven components from the Sonatype OSS Index API and stores it in a local SQLite database (`vulnerabilities.db`). It supports full data fetching, clearing previous data, retrying failed batches, and includes mechanisms to handle API rate limits gracefully.
+
+Features:
+---------
+- Asynchronous API requests with adaptive rate limiting and backoff strategy.
+- Supports retries for failed batches.
+- Handles API rate limits (429 errors) and respects 'Retry-After' headers.
+- Uses SQLite for storing component and vulnerability data.
+- Logs operations for real-time monitoring and debugging.
+
+Database Tables:
+----------------
+1. **components** - Stores component details (group ID, artifact ID, version).
+2. **vulnerabilities** - Stores vulnerability data (CVE, CVSS score, severity, etc.).
+
+Command-Line Arguments:
+-----------------------
+--restart           : Clears existing vulnerabilities and restarts the fetching process.
+--retry-failed      : Retries previously failed API calls stored in 'failed_batches.json'.
+
+Usage Examples:
+---------------
+1. **Full Fetch:**
+   python sonatypetestAPIpart.py
+
+2. **Full Restart (Clear Data & Start Fresh):**
+   python sonatypetestAPIpart.py --restart
+
+3. **Retry Failed Batches:**
+   python sonatypetestAPIpart.py --retry-failed
+
+"""
+
 import sqlite3
 import pandas as pd
 import json
@@ -14,6 +52,7 @@ import logging
 import argparse
 import asyncio
 import aiohttp
+import random
 from tqdm import tqdm
 
 # Utility function to format seconds into DD:HH:MM:SS
@@ -36,6 +75,7 @@ def setup_logging(log_file="fetch_log.txt"):
 
 # Initialize SQLite Database
 def init_db():
+    """Creates and initializes the SQLite database and required tables."""
     conn = sqlite3.connect("vulnerabilities.db")
     cursor = conn.cursor()
 
@@ -66,6 +106,7 @@ def init_db():
 
 # Clear existing vulnerabilities from database
 def clear_vulnerabilities(conn):
+    """Deletes all records from the vulnerabilities table."""
     cursor = conn.cursor()
     cursor.execute("DELETE FROM vulnerabilities")
     conn.commit()
@@ -73,6 +114,7 @@ def clear_vulnerabilities(conn):
 
 # Load Existing Components from Database
 def load_components(conn):
+    """Loads existing components from the database to process for vulnerabilities."""
     query = "SELECT component_id, group_id, artifact_id, version FROM components"
     df = pd.read_sql_query(query, conn)
     coordinates = [f"pkg:maven/{row['group_id']}/{row['artifact_id']}@{row['version']}" for _, row in df.iterrows()]
@@ -80,32 +122,41 @@ def load_components(conn):
     return coordinates
 
 # Asynchronous function to fetch vulnerabilities with adaptive rate limiting
-async def fetch_vulnerabilities(session, batch, headers, retries=5, backoff_factor=2):
+async def fetch_vulnerabilities(session, batch, headers, semaphore, retries=5, backoff_factor=3):
+    """Fetches vulnerabilities for a batch of components with rate limit handling."""
     url = "https://ossindex.sonatype.org/api/v3/component-report"
     backoff = 1
-    for attempt in range(retries):
-        try:
-            async with session.post(url, headers=headers, json={"coordinates": batch}) as response:
-                if response.status == 200:
-                    return await response.json()
-                elif response.status == 429:
-                    logging.warning(f"⚠ 429 Too Many Requests - Retrying in {backoff} seconds...")
-                    await asyncio.sleep(backoff)
-                    backoff *= backoff_factor
-                elif response.status == 403:
-                    logging.warning(f"⚠ 403 Forbidden - Backing off...")
-                    await asyncio.sleep(backoff * 2)
-                else:
-                    logging.error(f"⚠ Error {response.status}: {await response.text()}")
-                    break
-        except Exception as e:
-            logging.error(f"🚨 Exception during API call: {str(e)}")
-            await asyncio.sleep(backoff)
-            backoff *= backoff_factor
+    async with semaphore:
+        for attempt in range(retries):
+            try:
+                async with session.post(url, headers=headers, json={"coordinates": batch}) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    elif response.status == 429:
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            wait_time = int(retry_after)
+                            logging.warning(f"⚠ 429 Too Many Requests - Retrying in {wait_time} seconds...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logging.warning(f"⚠ 429 Too Many Requests - Retrying in {backoff} seconds...")
+                            await asyncio.sleep(backoff + random.uniform(0.5, 2.0))
+                            backoff *= backoff_factor
+                    elif response.status == 403:
+                        logging.warning(f"⚠ 403 Forbidden - Backing off...")
+                        await asyncio.sleep(backoff * 2)
+                    else:
+                        logging.error(f"⚠ Error {response.status}: {await response.text()}")
+                        break
+            except Exception as e:
+                logging.error(f"🚨 Exception during API call: {str(e)}")
+                await asyncio.sleep(backoff)
+                backoff *= backoff_factor
     return []
 
 # Process vulnerabilities asynchronously with retry for failed batches
 async def process_vulnerabilities(coordinates, conn, username, api_token):
+    """Processes batches of components to fetch and store vulnerabilities."""
     headers = {"Content-Type": "application/json"}
     if username and api_token:
         token = f"{username}:{api_token}"
@@ -116,14 +167,16 @@ async def process_vulnerabilities(coordinates, conn, username, api_token):
     failed_batches_file = "failed_batches.json"
     cursor = conn.cursor()
 
+    semaphore = asyncio.Semaphore(5)  # Limit concurrent requests
+    batch_size = 50  # Reduced batch size
+    failed_batches = []
+
     async with aiohttp.ClientSession() as session:
         tasks = []
-        batch_size = 100
-        failed_batches = []
-
         for i in range(0, len(coordinates), batch_size):
-            batch = coordinates[i:i+batch_size]
-            tasks.append(fetch_vulnerabilities(session, batch, headers))
+            batch = coordinates[i:i + batch_size]
+            tasks.append(fetch_vulnerabilities(session, batch, headers, semaphore))
+            await asyncio.sleep(random.uniform(0.5, 2.0))  # Random delay between batches
 
         for future in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fetching Vulnerabilities"):
             vulnerabilities = await future
@@ -167,6 +220,7 @@ async def process_vulnerabilities(coordinates, conn, username, api_token):
 
 # Main Function
 def main():
+    """Entry point for the script, handles argument parsing and execution."""
     parser = argparse.ArgumentParser(description="Fetch vulnerabilities from Sonatype OSS Index.")
     parser.add_argument("--restart", action="store_true", help="Restart from beginning and clear vulnerabilities.")
     parser.add_argument("--retry-failed", action="store_true", help="Retry previously failed batches.")
@@ -174,7 +228,6 @@ def main():
 
     setup_logging()
 
-    # Load configuration from file
     with open("config.json", "r") as f:
         config = json.load(f)
     api_token = config.get("api_token")
@@ -201,6 +254,5 @@ def main():
     conn.close()
     logging.info("✅ Vulnerability fetching completed.")
 
-# Run Main if Script is Executed
 if __name__ == "__main__":
     main()

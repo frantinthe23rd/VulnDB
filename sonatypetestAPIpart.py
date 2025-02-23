@@ -144,7 +144,7 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     return await response.json(), session
                 elif response.status == 429:
                     retry_after = response.headers.get('Retry-After')
-                    if (retry_after):
+                    if retry_after:
                         wait_time = int(retry_after)
                     else:
                         wait_time = 180  # 3 minutes
@@ -169,6 +169,12 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
             backoff = min(backoff * 2, max_backoff)
     return [], session
 
+async def process_batch(batch, headers, global_rate_limiter, session, semaphore):
+    async with semaphore:
+        payload = {"coordinates": batch}
+        vulnerabilities, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+        return vulnerabilities, session
+
 # Process vulnerabilities with smarter batch handling
 async def process_vulnerabilities(coordinates, conn, username, api_token, incremental=False, retry_failed=False):
     headers = {"Content-Type": "application/json"}
@@ -179,6 +185,8 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
 
     batch_size = 128
     failed_batches = []
+    max_batches_per_session = 50
+    max_concurrent_tasks = 10  # Adjust this number based on your system's capacity
 
     checkpoint_file = "checkpoint_vulnerabilities.json"
     start_index = 0
@@ -188,20 +196,29 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
             checkpoint_data = json.load(f)
             start_index = checkpoint_data.get("last_index", 0)
 
+    semaphore = asyncio.Semaphore(max_concurrent_tasks)
+
     async with aiohttp.ClientSession() as session:
         if retry_failed and os.path.exists("failed_batches.json"):
             with open("failed_batches.json", "r") as f:
                 coordinates = json.load(f)
             logging.info(f"🔄 Retrying {len(coordinates)} failed components.")
 
-        for i in tqdm(range(start_index, len(coordinates), batch_size), desc="Fetching Vulnerabilities"):
-            batch = coordinates[i:i + batch_size]
-            payload = {"coordinates": batch}
-            vulnerabilities, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+        for i in tqdm(range(start_index, len(coordinates), batch_size * max_batches_per_session), desc="Fetching Vulnerabilities"):
+            tasks = []
+            for j in range(i, min(i + batch_size * max_batches_per_session, len(coordinates)), batch_size):
+                batch = coordinates[j:j + batch_size]
+                tasks.append(process_batch(batch, headers, global_rate_limiter, session, semaphore))
+
+            results = await asyncio.gather(*tasks)
+            vulnerabilities = []
+            for result in results:
+                batch_vulnerabilities, session = result
+                vulnerabilities.extend(batch_vulnerabilities)
 
             if not vulnerabilities:
-                logging.warning(f"⚠ Retrying batch with reduced size.")
-                for component in batch:
+                logging.warning(f"⚠ Retrying batches with reduced size.")
+                for component in coordinates[i:i + batch_size * max_batches_per_session]:
                     payload = {"coordinates": [component]}
                     component_vulns, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
                     if component_vulns:
@@ -246,9 +263,13 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
 
             # Save checkpoint
             with open(checkpoint_file, "w") as f:
-                json.dump({"last_index": i + batch_size}, f)
+                json.dump({"last_index": i + batch_size * max_batches_per_session}, f)
 
             await asyncio.sleep(random.uniform(10, 20))  # Increased delay between batches
+
+            # Terminate and restart session after processing max_batches_per_session
+            await session.close()
+            session = aiohttp.ClientSession()
 
     if failed_batches:
         with open("failed_batches.json", "w") as f:

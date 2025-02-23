@@ -1,3 +1,5 @@
 config.json
 vulnerabilities.db
 component_fetch_log.txt
+checkpoint_vulnerabilities.json
+fetch_log.txt

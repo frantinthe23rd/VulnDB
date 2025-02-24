@@ -141,7 +141,7 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                 rate_limit_reset = response.headers.get('X-RateLimit-Reset')
 
                 if response.status == 200:
-                    return await response.json(), session
+                    return await response.json()
                 elif response.status == 429:
                     retry_after = response.headers.get('Retry-After')
                     if retry_after:
@@ -151,8 +151,6 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                     logging.warning(f"⚠ 429 Too Many Requests - Pausing all threads for {wait_time} seconds...")
                     await asyncio.sleep(wait_time)
                     logging.info("🔄 Retrying after pause...")
-                    await session.close()  # Close the current session
-                    session = aiohttp.ClientSession()  # Create a new session
                     backoff = min(backoff * 2, max_backoff)  # Exponential backoff
                     continue  # Retry the same request after the pause
                 elif rate_limit_remaining is not None and int(rate_limit_remaining) < 5:
@@ -162,18 +160,24 @@ async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limite
                 else:
                     logging.error(f"⚠ Error {response.status}: {await response.text()}")
                     break
+        except aiohttp.ClientError as e:
+            logging.error(f"🚨 ClientError during API call: {str(e)}")
+            jitter = random.uniform(1.0, 3.0)
+            await asyncio.sleep(backoff + jitter)
+            backoff = min(backoff * 2, max_backoff)
         except Exception as e:
             logging.error(f"🚨 Exception during API call: {str(e)}")
             jitter = random.uniform(1.0, 3.0)
             await asyncio.sleep(backoff + jitter)
             backoff = min(backoff * 2, max_backoff)
-    return [], session
+    return []
 
-async def process_batch(batch, headers, global_rate_limiter, session, semaphore):
+async def process_batch(batch, headers, global_rate_limiter, semaphore):
     async with semaphore:
         payload = {"coordinates": batch}
-        vulnerabilities, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
-        return vulnerabilities, session
+        async with aiohttp.ClientSession() as session:
+            vulnerabilities = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+        return vulnerabilities
 
 # Process vulnerabilities with smarter batch handling
 async def process_vulnerabilities(coordinates, conn, username, api_token, incremental=False, retry_failed=False):
@@ -186,7 +190,7 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
     batch_size = 128
     failed_batches = []
     max_batches_per_session = 50
-    max_concurrent_tasks = 10  # Adjust this number based on your system's capacity
+    max_concurrent_tasks = 30  # Increased parallelism
 
     checkpoint_file = "checkpoint_vulnerabilities.json"
     start_index = 0
@@ -198,56 +202,56 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
 
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
 
-    async with aiohttp.ClientSession() as session:
-        if retry_failed and os.path.exists("failed_batches.json"):
-            with open("failed_batches.json", "r") as f:
-                coordinates = json.load(f)
-            logging.info(f"🔄 Retrying {len(coordinates)} failed components.")
+    if retry_failed and os.path.exists("failed_batches.json"):
+        with open("failed_batches.json", "r") as f:
+            coordinates = json.load(f)
+        logging.info(f"🔄 Retrying {len(coordinates)} failed components.")
 
-        for i in tqdm(range(start_index, len(coordinates), batch_size * max_batches_per_session), desc="Fetching Vulnerabilities"):
-            tasks = []
-            for j in range(i, min(i + batch_size * max_batches_per_session, len(coordinates)), batch_size):
-                batch = coordinates[j:j + batch_size]
-                tasks.append(process_batch(batch, headers, global_rate_limiter, session, semaphore))
+    for i in tqdm(range(start_index, len(coordinates), batch_size * max_batches_per_session), desc="Fetching Vulnerabilities"):
+        tasks = []
+        for j in range(i, min(i + batch_size * max_batches_per_session, len(coordinates)), batch_size):
+            batch = coordinates[j:j + batch_size]
+            tasks.append(process_batch(batch, headers, global_rate_limiter, semaphore))
 
-            results = await asyncio.gather(*tasks)
-            vulnerabilities = []
-            for result in results:
-                batch_vulnerabilities, session = result
-                vulnerabilities.extend(batch_vulnerabilities)
+        results = await asyncio.gather(*tasks)
+        vulnerabilities = []
+        for result in results:
+            vulnerabilities.extend(result)
 
-            if not vulnerabilities:
-                logging.warning(f"⚠ Retrying batches with reduced size.")
-                for component in coordinates[i:i + batch_size * max_batches_per_session]:
-                    payload = {"coordinates": [component]}
-                    component_vulns, session = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
-                    if component_vulns:
-                        vulnerabilities.extend(component_vulns)
-                    else:
-                        failed_batches.append(component)
+        if not vulnerabilities:
+            logging.warning(f"⚠ Retrying batches with reduced size.")
+            for component in coordinates[i:i + batch_size * max_batches_per_session]:
+                payload = {"coordinates": [component]}
+                async with aiohttp.ClientSession() as session:
+                    component_vulns = await fetch_with_dynamic_backoff(session, "https://ossindex.sonatype.org/api/v3/component-report", headers, payload, global_rate_limiter)
+                if component_vulns:
+                    vulnerabilities.extend(component_vulns)
+                else:
+                    failed_batches.append(component)
 
-            # Store vulnerabilities in DB
-            cursor = conn.cursor()
-            for package in vulnerabilities:
-                coordinate = package.get("coordinates", "")
-                match = re.match(r'pkg:maven/(.*)/(.*)@(.*)', coordinate)
-                if match:
-                    group_id, artifact_id, version = match.groups()
-                    cursor.execute('''
-                        SELECT component_id FROM components
-                        WHERE group_id = ? AND artifact_id = ? AND version = ?
-                    ''', (group_id, artifact_id, version))
-                    result = cursor.fetchone()
-                    if result:
-                        component_id = result[0]
-                        for vuln in package.get("vulnerabilities", []):
-                            if incremental:
-                                cursor.execute('''
-                                    SELECT 1 FROM vulnerabilities
-                                    WHERE component_id = ? AND cve = ?
-                                ''', (component_id, vuln.get("cve", "n/a")))
-                                if cursor.fetchone():
-                                    continue
+        # Store vulnerabilities in DB
+        cursor = conn.cursor()
+        for package in vulnerabilities:
+            coordinate = package.get("coordinates", "")
+            match = re.match(r'pkg:maven/(.*)/(.*)@(.*)', coordinate)
+            if match:
+                group_id, artifact_id, version = match.groups()
+                cursor.execute('''
+                    SELECT component_id FROM components
+                    WHERE group_id = ? AND artifact_id = ? AND version = ?
+                ''', (group_id, artifact_id, version))
+                result = cursor.fetchone()
+                if result:
+                    component_id = result[0]
+                    for vuln in package.get("vulnerabilities", []):
+                        if incremental:
+                            cursor.execute('''
+                                SELECT 1 FROM vulnerabilities
+                                WHERE component_id = ? AND cve = ?
+                            ''', (component_id, vuln.get("cve", "n/a")))
+                            if cursor.fetchone():
+                                continue
+                        try:
                             cursor.execute('''
                                 INSERT INTO vulnerabilities (component_id, cve, cvss_score, severity, published_date, payload)
                                 VALUES (?, ?, ?, ?, ?, ?)
@@ -259,17 +263,15 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
                                 vuln.get("published", "n/a"),
                                 json.dumps(vuln)
                             ))
-            conn.commit()
+                        except sqlite3.Error as e:
+                            logging.error(f"SQLite error when inserting vulnerability: {e}")
+        conn.commit()
 
-            # Save checkpoint
-            with open(checkpoint_file, "w") as f:
-                json.dump({"last_index": i + batch_size * max_batches_per_session}, f)
+        # Save checkpoint
+        with open(checkpoint_file, "w") as f:
+            json.dump({"last_index": i + batch_size * max_batches_per_session}, f)
 
-            await asyncio.sleep(random.uniform(10, 20))  # Increased delay between batches
-
-            # Terminate and restart session after processing max_batches_per_session
-            await session.close()
-            session = aiohttp.ClientSession()
+        await asyncio.sleep(random.uniform(5, 10))  # Reduced delay between batches
 
     if failed_batches:
         with open("failed_batches.json", "w") as f:
@@ -296,7 +298,11 @@ def main():
     api_token = config.get("api_token")
     username = config.get("username")
 
-    conn = init_db()
+    try:
+        conn = init_db()
+    except sqlite3.Error as e:
+        logging.error(f"🚨 Failed to initialize database: {e}")
+        return
 
     if args.restart:
         cursor = conn.cursor()

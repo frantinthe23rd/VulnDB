@@ -27,21 +27,21 @@ Usage Examples:
    python populatecomponents3.py
 
 2. **Full Restart (Clear Data & Start Fresh):**
-   python populatecomponents3.py --restart
+   python.populatecomponents3.py --restart
 
 3. **Incremental Fetch:**
-   python populatecomponents3.py --incremental
+   python.populatecomponents3.py --incremental
 
 4. **Retry Failed Batches:**
-   python populatecomponents3.py --retry-failed
+   python.populatecomponents3.py --retry-failed
 
 5. **Full Restart and Incremental Fetch:**
    python.populatecomponents3.py --restart --incremental
 
 """
-
 import sqlite3
 import requests
+from typing import Optional
 import json
 import time
 import logging
@@ -134,39 +134,67 @@ def update_last_fetch_date(conn, last_fetch_date):
     cursor.execute("INSERT INTO fetch_metadata (last_fetch_date) VALUES (?)", (last_fetch_date,))
     conn.commit()
 
-# Function to handle API calls with exponential backoff for 403 errors
-async def fetch_with_backoff(session, url, params, max_retries=10):
+# Function to handle API calls with exponential backoff for all errors
+async def fetch_with_backoff(session: aiohttp.ClientSession, url: str, params: dict, max_retries: int = 10) -> Optional[dict]:
     backoff = 1  # Initial backoff time in seconds
     headers = {
         'User-Agent': 'Mozilla/5.0 (compatible; MyFetcherBot/1.0; +http://mydomain.com/bot)'
     }
     for attempt in range(max_retries):
-        async with session.get(url, params=params, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            elif response.status == 403:
-                retry_after = response.headers.get('Retry-After')
-                if retry_after:
-                    wait_time = int(retry_after)
-                    logging.warning(f"🚫 403 Forbidden. Retry-After header found. Waiting {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logging.warning(f"🚫 403 Forbidden. Attempt {attempt + 1}/{max_retries}. Retrying in {backoff} seconds...")
-                    await asyncio.sleep(backoff + random.uniform(0, 1))  # Add jitter
+        try:
+            async with session.get(url, params=params, headers=headers) as response:
+                if response.status == 200:
+                    return await response.json()
+                elif response.status in [403, 429]:
+                    retry_after = response.headers.get('Retry-After', 30)  # Default to 30 seconds if missing
+                    logging.warning(f"🚫 {response.status} Error. Retrying in {retry_after} seconds...")
+                    await asyncio.sleep(int(retry_after))
                     backoff = min(backoff * 2, 60)  # Exponential backoff with a cap
-            else:
-                logging.error(f"⚠ Unexpected status code: {response.status}")
-                return None
-    logging.error("❌ Max retries reached for 403 errors.")
+                else:
+                    logging.error(f"⚠ Unexpected status code: {response.status}")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)  # Exponential backoff with a cap
+        except aiohttp.ClientError as e:
+            logging.error(f"⚠ Network error: {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)  # Exponential backoff with a cap
+    logging.error("❌ Max retries reached for API errors.")
     return None
 
-# Processes batches of components with concurrency and bulk inserts
+# Fetch all versions for a given group_id and artifact_id
+async def fetch_all_versions(session, group_id, artifact_id):
+    versions = []
+    version_params = {
+        "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
+        "core": "gav",
+        "rows": 100,
+        "wt": "json"
+    }
+    total_versions = 0
+    start = 0
+
+    while True:
+        version_params["start"] = start
+        version_data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", version_params)
+        if version_data:
+            total_versions = version_data.get("response", {}).get("numFound", 0)
+            versions.extend(version_data.get("response", {}).get("docs", []))
+            start += 100
+            if start >= total_versions:
+                break
+        else:
+            logging.warning(f"⚠ Failed to fetch versions for {group_id}:{artifact_id}. Retrying...")
+            await asyncio.sleep(5)  # Wait before retrying
+
+    return versions
+
+# Processes batches of components with concurrency and bulk inserts, with pagination for versions
 async def process_batches(start_indices, rows):
     conn = init_db()
     total_processed = 0
     total_failed = 0
     db_lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(5)  # Reduced concurrency control
+    semaphore = asyncio.Semaphore(5)  # Concurrency control
     bulk_insert_data = []
 
     async with aiohttp.ClientSession() as session:
@@ -184,30 +212,24 @@ async def process_batches(start_indices, rows):
                         group_id = doc.get("g", "unknown_group")
                         artifact_id = doc.get("a", "unknown_artifact")
 
-                        version_params = {
-                            "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
-                            "core": "gav",
-                            "rows": 100,
-                            "wt": "json"
-                        }
-                        version_data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", version_params)
+                        # Fetch all versions
+                        versions = await fetch_all_versions(session, group_id, artifact_id)
+                        for version_doc in versions:
+                            version = version_doc.get("v", "unknown_version")
+                            bulk_insert_data.append((group_id, artifact_id, version))
+                            total_processed += 1
 
-                        if version_data:
-                            for version_doc in version_data.get("response", {}).get("docs", []):
-                                version = version_doc.get("v", "unknown_version")
-                                bulk_insert_data.append((group_id, artifact_id, version))
-                                total_processed += 1
+                            if len(bulk_insert_data) >= 500:
+                                async with db_lock:
+                                    cursor = conn.cursor()
+                                    cursor.executemany('''
+                                        INSERT OR IGNORE INTO components (group_id, artifact_id, version)
+                                        VALUES (?, ?, ?)
+                                    ''', bulk_insert_data)
+                                    conn.commit()
+                                    bulk_insert_data.clear()
 
-                                if len(bulk_insert_data) >= 500:
-                                    async with db_lock:
-                                        cursor = conn.cursor()
-                                        cursor.executemany('''
-                                            INSERT OR IGNORE INTO components (group_id, artifact_id, version)
-                                            VALUES (?, ?, ?)
-                                        ''', bulk_insert_data)
-                                        conn.commit()
-                                        bulk_insert_data.clear()
-                        else:
+                        if not versions:
                             async with db_lock:
                                 cursor = conn.cursor()
                                 cursor.execute('''
@@ -260,38 +282,25 @@ def main():
         clear_checkpoint()
         logging.info("🔄 Full restart: cleared components, failed batches, and checkpoint.")
 
-    if args.retry_failed:
-        cursor = conn.cursor()
-        cursor.execute("SELECT group_id, artifact_id FROM failed_batches")
-        failed_batches = cursor.fetchall()
-        if not failed_batches:
-            logging.info("✅ No failed batches to retry.")
-            return
+    total_docs = 0
+    params = {"q": "*:*", "rows": 1, "wt": "json"}
 
-        start_indices = [0]  # Dummy start index to process failed batches
-        rows = len(failed_batches)
-        coordinates = [f"pkg:maven/{g}/{a}@latest" for g, a in failed_batches]
-        asyncio.run(process_batches(start_indices, rows))
+    initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
+    if initial_response.status_code == 200:
+        total_docs = initial_response.json().get("response", {}).get("numFound", 0)
     else:
-        total_docs = 0
-        params = {"q": "*:*", "rows": 1, "wt": "json"}
+        logging.error("⚠ Failed to get total number of components.")
+        return
 
-        initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
-        if initial_response.status_code == 200:
-            total_docs = initial_response.json().get("response", {}).get("numFound", 0)
-        else:
-            logging.error("⚠ Failed to get total number of components.")
-            return
+    logging.info(f"📊 Total components to fetch: {total_docs}")
 
-        logging.info(f"📊 Total components to fetch: {total_docs}")
+    rows = args.batch_size
+    start_indices = list(range(args.start_index, total_docs, rows))
 
-        rows = args.batch_size
-        start_indices = list(range(args.start_index, total_docs, rows))
+    asyncio.run(process_batches(start_indices, rows))
 
-        asyncio.run(process_batches(start_indices, rows))
-
-        if args.incremental:
-            update_last_fetch_date(conn, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    if args.incremental:
+        update_last_fetch_date(conn, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
     logging.info("✅ All batches processed.")
 

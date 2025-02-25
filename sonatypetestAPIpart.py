@@ -79,30 +79,34 @@ def setup_logging(log_file="fetch_log.txt"):
 
 # Initialize SQLite Database
 def init_db():
-    conn = sqlite3.connect("vulnerabilities.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS components (
-            component_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id TEXT,
-            artifact_id TEXT,
-            version TEXT
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS vulnerabilities (
-            vuln_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            component_id INTEGER,
-            cve TEXT,
-            cvss_score REAL,
-            severity TEXT,
-            published_date TEXT,
-            payload TEXT,
-            FOREIGN KEY (component_id) REFERENCES components (component_id)
-        )
-    ''')
-    conn.commit()
-    return conn
+    try:
+        conn = sqlite3.connect("vulnerabilities.db")
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS components (
+                component_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT,
+                artifact_id TEXT,
+                version TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vulnerabilities (
+                vuln_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                component_id INTEGER,
+                cve TEXT,
+                cvss_score REAL,
+                severity TEXT,
+                published_date TEXT,
+                payload TEXT,
+                FOREIGN KEY (component_id) REFERENCES components (component_id)
+            )
+        ''')
+        conn.commit()
+        return conn
+    except sqlite3.Error as e:
+        logging.error(f"🚨 Failed to initialize database: {e}")
+        raise
 
 # Token Bucket Rate Limiter
 class RateLimiter:
@@ -111,6 +115,7 @@ class RateLimiter:
         self.per = per
         self.allowance = rate
         self.last_check = time.monotonic()
+        self.event = asyncio.Event()
 
     async def acquire(self):
         while True:
@@ -125,10 +130,18 @@ class RateLimiter:
             if self.allowance >= 1:
                 self.allowance -= 1
                 return
-            await asyncio.sleep((1 - self.allowance) * (self.per / self.rate))
+            
+            wait_time = (1 - self.allowance) * (self.per / self.rate)
+            self.event.clear()
+            try:
+                await asyncio.wait_for(self.event.wait(), timeout=wait_time)
+            except asyncio.TimeoutError:
+                # Log the timeout and retry
+                logging.warning(f"⚠ Rate limiter timeout, retrying after {wait_time} seconds...")
+                continue
 
 # Global rate limiter instance
-global_rate_limiter = RateLimiter(rate=1, per=10)  # Increased to 1 request every 10 seconds
+global_rate_limiter = RateLimiter(rate=1, per=15)  # Increased to 1 request every 15 seconds
 
 # Dynamic Rate Limiting and Retry Logic with Jitter
 async def fetch_with_dynamic_backoff(session, url, headers, payload, rate_limiter, retries=5, max_backoff=600):
@@ -187,10 +200,10 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         encoded_token = b64encode(token.encode()).decode()
         headers["Authorization"] = f"Basic {encoded_token}"
 
-    batch_size = 128
+    batch_size = 100
     failed_batches = []
-    max_batches_per_session = 50
-    max_concurrent_tasks = 30  # Increased parallelism
+    max_batches_per_session = 1
+    max_concurrent_tasks = 1 # Increased parallelism
 
     checkpoint_file = "checkpoint_vulnerabilities.json"
     start_index = 0
@@ -271,7 +284,7 @@ async def process_vulnerabilities(coordinates, conn, username, api_token, increm
         with open(checkpoint_file, "w") as f:
             json.dump({"last_index": i + batch_size * max_batches_per_session}, f)
 
-        await asyncio.sleep(random.uniform(5, 10))  # Reduced delay between batches
+        await asyncio.sleep(random.uniform(30, 60))  # Reduced delay between batches
 
     if failed_batches:
         with open("failed_batches.json", "w") as f:
@@ -305,17 +318,25 @@ def main():
         return
 
     if args.restart:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM vulnerabilities")
-        count = cursor.fetchone()[0]
-        cursor.execute("DELETE FROM vulnerabilities")
-        conn.commit()
-        logging.info(f"🔄 Restarting: Cleared {count} records from the vulnerabilities table.")
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM vulnerabilities")
+            count = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM vulnerabilities")
+            conn.commit()
+            logging.info(f"🔄 Restarting: Cleared {count} records from the vulnerabilities table.")
+        except sqlite3.Error as e:
+            logging.error(f"🚨 SQLite error during restart: {e}")
+            return
 
-    cursor = conn.cursor()
-    cursor.execute("SELECT group_id, artifact_id, version FROM components")
-    components = cursor.fetchall()
-    logging.info(f"✅ Retrieved {len(components)} components from the database.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT group_id, artifact_id, version FROM components")
+        components = cursor.fetchall()
+        logging.info(f"✅ Retrieved {len(components)} components from the database.")
+    except sqlite3.Error as e:
+        logging.error(f"🚨 SQLite error when fetching components: {e}")
+        return
 
     coordinates = [f"pkg:maven/{g}/{a}@{v}" for g, a, v in components]
 

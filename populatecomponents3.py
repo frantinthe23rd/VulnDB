@@ -40,6 +40,7 @@ Usage Examples:
 
 """
 
+
 import sqlite3
 import requests
 from typing import Optional
@@ -47,13 +48,13 @@ import json
 import time
 import logging
 import argparse
-import concurrent.futures
 import os
-import random
 import asyncio
 import aiohttp
-import urllib.parse
 from tqdm import tqdm
+
+# Define a global database lock for thread safety
+db_lock = asyncio.Lock()
 
 # Utility function to format seconds into DD:HH:MM:SS
 def format_duration(seconds):
@@ -104,16 +105,27 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS component_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT,
+            artifact_id TEXT,
+            status TEXT,
+            UNIQUE(group_id, artifact_id)
+        )
+    ''')
+
     conn.commit()
     return conn
 
-# Clears all components and failed batches from the database when a full restart is needed
+# Clears all components, failed batches, and component status from the database when a full restart is needed
 def clear_components(conn):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM components")
     cursor.execute("DELETE FROM failed_batches")  # Clears failed batches
+    cursor.execute("DELETE FROM component_status")  # Clears component status
     conn.commit()
-    logging.info("🗑️ Existing components and failed batches cleared from database.")
+    logging.info("🗑️ Existing components, failed batches, and component status cleared from database.")
 
 # Clears the checkpoint file used for incremental fetching
 def clear_checkpoint():
@@ -135,16 +147,23 @@ def update_last_fetch_date(conn, last_fetch_date):
     cursor.execute("INSERT INTO fetch_metadata (last_fetch_date) VALUES (?)", (last_fetch_date,))
     conn.commit()
 
+# Fetches the status of a component
+def fetch_component_status(conn, group_id, artifact_id):
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT status FROM component_status
+        WHERE group_id = ? AND artifact_id = ?
+    ''', (group_id, artifact_id))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
 # Function to handle API calls with exponential backoff
 async def fetch_with_backoff(session: aiohttp.ClientSession, url: str, params: dict, max_retries: int = 10) -> Optional[dict]:
     backoff = 1  # Initial backoff time in seconds
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; MyMavenCentralFetcher/1.0; +http://mydomain.com/bot)'
-    }
     for attempt in range(max_retries):
         try:
-            async with session.get(url, params=params, headers=headers) as response:
-                if response.status == 200:
+            async with session.get(url, params=params) as response:
+                if (response.status == 200):
                     return await response.json()
                 elif response.status in [403, 429]:
                     # Handle rate-limiting or forbidden responses with backoff
@@ -164,18 +183,18 @@ async def fetch_with_backoff(session: aiohttp.ClientSession, url: str, params: d
     return None
 
 # Fetch all versions for a given group_id and artifact_id
-# CHANGED: Limit attempts if repeated None returns, to avoid infinite loops
+# Contains logic to handle repeated failures and avoid infinite loops
 async def fetch_all_versions(session, group_id, artifact_id):
     versions = []
     version_params = {
         "q": f"g:\"{group_id}\" AND a:\"{artifact_id}\"",
         "core": "gav",
-        "rows": 100,
+        "rows": 20,  # Set the batch size to 20
         "wt": "json"
     }
     total_versions = 0
     start = 0
-    max_version_retries = 3  # NEW: We'll allow a few attempts if we keep getting None
+    max_version_retries = 3
 
     attempts = 0
     while True:
@@ -183,26 +202,22 @@ async def fetch_all_versions(session, group_id, artifact_id):
         version_data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", version_params)
 
         if version_data:
-            attempts = 0  # Reset attempts since we got a valid response
+            attempts = 0  # reset attempts
             response_info = version_data.get("response", {})
             total_versions = response_info.get("numFound", 0)
-
-            # If there's no `response.docs`, we likely got an empty list
             docs = response_info.get("docs", [])
             versions.extend(docs)
-            start += 100
-            # If we've fetched all versions, break
+            start += 20  # Move to the next batch
             if start >= total_versions:
                 break
         else:
-            # version_data is None; increment attempt
             attempts += 1
-            logging.warning(f"⚠ Failed to fetch versions for {group_id}:{artifact_id} (attempt {attempts}).")
             if attempts >= max_version_retries:
-                # Break out to avoid infinite loop
-                logging.error(f"❌ Aborting version fetch for {group_id}:{artifact_id} after {attempts} failed attempts.")
                 return None
-            await asyncio.sleep(5)  # small delay, then try again
+            await asyncio.sleep(5)
+
+        # Small delay to prevent rate limiting
+        await asyncio.sleep(1)
 
     return versions
 
@@ -214,22 +229,28 @@ async def fetch_updated_components(session, last_fetch_date, start, rows):
         "start": start,
         "wt": "json"
     }
-    return await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+    response = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+    return response if response else {"response": {"docs": []}}
 
-# Save the checkpoint to a file
-def save_checkpoint(index):
+# Save and load checkpoint
+async def save_checkpoint(index):
     checkpoint_file = "checkpoint_components.json"
-    with open(checkpoint_file, "w") as f:
-        json.dump({"last_index": index}, f)
+    async with db_lock:
+        with open(checkpoint_file, "w") as f:
+            json.dump({"last_index": index}, f)
 
-# Load the checkpoint from a file
 def load_checkpoint():
     checkpoint_file = "checkpoint_components.json"
     if os.path.exists(checkpoint_file):
         with open(checkpoint_file, "r") as f:
             data = json.load(f)
-            return data.get("last_index", 0)
-    return 0
+            last_index = data.get("last_index", "")
+            if isinstance(last_index, str):
+                return last_index
+            else:
+                logging.warning(f"Invalid checkpoint value: {last_index}. Resetting to empty string.")
+                return ""
+    return ""
 
 # Fetch failed batches from the database
 def fetch_failed_batches(conn):
@@ -237,76 +258,145 @@ def fetch_failed_batches(conn):
     cursor.execute("SELECT group_id, artifact_id FROM failed_batches")
     return cursor.fetchall()
 
-# Processes batches of components with concurrency and bulk inserts, with pagination for versions
-# CHANGED: Added a retry mechanism for entire batch fetch if data comes back None.
-async def process_batches(start_indices, rows, last_fetch_date=None):
+# Fetch all components from Maven Central Repository
+async def fetch_all_components(session, start, rows=20):
     """
-    This function fetches components in pages determined by start_indices.
-    For each component, it also fetches all versions by paging in increments of 100.
+    Fetches all Maven components with proper pagination and stores them in the component_status table as "unprocessed".
+    Resumes from the last processed component if not restarting.
     """
+    all_components = []
+    conn = init_db()
+
+    # Get the total count of components available
+    params = {
+        "q": "*:*",
+        "rows": rows,
+        "start": 0,
+        "wt": "json"
+    }
+    response = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+
+    if response and "response" in response:
+        total_docs = response["response"].get("numFound", 0)
+        logging.info(f"📊 Total components to fetch: {total_docs}")
+    else:
+        logging.error("⚠ Failed to get the total number of components.")
+        return {"response": {"docs": []}}
+
+    # Check the last processed component from the component_status table
+    cursor = conn.cursor()
+    if start:
+        cursor.execute('''
+            SELECT COUNT(*) FROM component_status WHERE group_id || ':' || artifact_id > ?
+        ''', (start,))
+    else:
+        cursor.execute('''
+            SELECT COUNT(*) FROM component_status
+        ''')
+    processed_count = cursor.fetchone()[0]
+    start = processed_count if processed_count else 0
+
+    # Loop through pages until we fetch everything
+    while start < total_docs:
+        params = {
+            "q": "*:*",
+            "rows": rows,
+            "start": start,
+            "wt": "json"
+        }
+        page_response = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+
+        if page_response and "response" in page_response:
+            docs = page_response["response"].get("docs", [])
+            logging.info(f"Fetched {len(docs)} components in this batch.")
+            all_components.extend(docs)
+
+            # Store components in the component_status table as "unprocessed"
+            async with db_lock:
+                cursor = conn.cursor()
+                for doc in docs:
+                    group_id = doc.get("g", "unknown_group")
+                    artifact_id = doc.get("a", "unknown_artifact")
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO component_status (group_id, artifact_id, status)
+                        VALUES (?, ?, ?)
+                    ''', (group_id, artifact_id, "unprocessed"))
+                conn.commit()
+
+            logging.info(f"✅ Fetched and inserted {len(docs)} components. Total fetched so far: {len(all_components)}")
+
+        # Move to next batch
+        start += rows
+        logging.info(f"✅ Fetched {start}/{total_docs} components...")
+
+        # Small delay to prevent rate limiting
+        await asyncio.sleep(1)
+
+    logging.info(f"✅ Finished fetching all {total_docs} components.")
+    conn.close()
+    return {"response": {"docs": all_components}}
+
+async def process_batches(rows):
     conn = init_db()
     total_processed = 0
     total_failed = 0
-    db_lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(5)  # Concurrency control
     bulk_insert_data = []
-    MAX_BATCH_FETCH_RETRIES = 3  # NEW: We'll attempt each batch multiple times
+    MAX_BATCH_FETCH_RETRIES = 3
+
+    # We'll keep a concurrency limit for version fetches
+    # so we don't overwhelm the server.
+    version_fetch_semaphore = asyncio.Semaphore(3)
 
     async with aiohttp.ClientSession() as session:
-        for start in tqdm(start_indices, desc="Processing Batches"):
-            batch_data = None
-            for attempt_num in range(MAX_BATCH_FETCH_RETRIES):
-                async with semaphore:
-                    # EITHER we fetch updated components OR all components
-                    if last_fetch_date:
-                        data = await fetch_updated_components(session, last_fetch_date, start, rows)
-                    else:
-                        params = {
-                            "q": "*:*",
-                            "rows": rows,
-                            "start": start,
-                            "wt": "json"
-                        }
-                        data = await fetch_with_backoff(session, "https://search.maven.org/solrsearch/select", params)
+        while True:
+            # Fetch unprocessed components from the database
+            docs = fetch_unprocessed_components(conn, rows)
 
-                if data:
-                    batch_data = data
-                    break  # successful fetch
-                else:
-                    logging.warning(f"⚠ Failed to fetch batch (start={start}). Attempt {attempt_num+1}/{MAX_BATCH_FETCH_RETRIES}")
-                    await asyncio.sleep(5)
+            if not docs:
+                break
 
-            # If after multiple attempts we still have no data for this batch, mark as failed
-            if batch_data is None:
-                logging.error(f"❌ Entire batch starting at {start} failed after {MAX_BATCH_FETCH_RETRIES} attempts.")
-                async with db_lock:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        INSERT INTO failed_batches (group_id, artifact_id, reason)
-                        VALUES (?, ?, ?)
-                    ''', ("unknown_batch", f"batch_start_{start}", "Failed entire batch fetch"))
-                    conn.commit()
-                total_failed += 1
-                # save checkpoint so we can resume later
-                save_checkpoint(start)
-                continue
-
-            # process the docs in the batch
-            docs = batch_data.get("response", {}).get("docs", [])
+            # -----------------------------------------------
+            # 1) Build a list of tasks to fetch versions in parallel
+            # -----------------------------------------------
+            fetch_tasks = []
             for doc in docs:
-                group_id = doc.get("g", "unknown_group")
-                artifact_id = doc.get("a", "unknown_artifact")
+                group_id, artifact_id = doc
 
-                # Fetch all versions for this artifact
-                versions = await fetch_all_versions(session, group_id, artifact_id)
-                if versions:
+                async def fetch_versions_for_artifact(gid, aid):
+                    # Acquire semaphore to limit concurrency
+                    async with version_fetch_semaphore:
+                        versions = await fetch_all_versions(session, gid, aid)
+                        return (gid, aid, versions)
+
+                fetch_tasks.append(fetch_versions_for_artifact(group_id, artifact_id))
+
+            # -----------------------------------------------
+            # 2) Gather them concurrently with a progress bar
+            # -----------------------------------------------
+            with tqdm(total=len(fetch_tasks), desc=f"Fetching versions for {group_id}:{artifact_id}", leave=False, dynamic_ncols=True) as pbar:
+                for future in asyncio.as_completed(fetch_tasks):
+                    gid, aid, versions = await future
+                    pbar.update(1)
+
+                    # -----------------------------------------------
+                    # 3) Process each fetch result
+                    # -----------------------------------------------
+                    if versions is None:
+                        # Means repeated failures for that artifact
+                        await record_failed_batch(conn, gid, aid, "Failed to fetch versions")
+                        total_failed += 1
+                        await update_component_status(conn, gid, aid, "failed")
+                        continue
+
+                    # If success, store them in our bulk insert buffer
                     for version_doc in versions:
-                        version = version_doc.get("v", "unknown_version")
-                        bulk_insert_data.append((group_id, artifact_id, version))
-                        total_processed += 1
+                        version_str = version_doc.get("v", "unknown_version")
+                        if isinstance(version_str, str):
+                            bulk_insert_data.append((gid, aid, version_str))
+                            total_processed += 1
 
-                        # Insert data in chunks of 500
-                        if len(bulk_insert_data) >= 500:
+                        # Insert in chunks
+                        if len(bulk_insert_data) >= rows:
                             async with db_lock:
                                 cursor = conn.cursor()
                                 cursor.executemany('''
@@ -315,22 +405,16 @@ async def process_batches(start_indices, rows, last_fetch_date=None):
                                 ''', bulk_insert_data)
                                 conn.commit()
                             bulk_insert_data.clear()
-                else:
-                    # versions == None => repeated failures for that artifact
-                    async with db_lock:
-                        cursor = conn.cursor()
-                        cursor.execute('''
-                            INSERT INTO failed_batches (group_id, artifact_id, reason)
-                            VALUES (?, ?, ?)
-                        ''', (group_id, artifact_id, "Failed to fetch versions"))
-                        conn.commit()
-                    total_failed += 1
 
-            # -----------------------------------------------------
+                    # Update component status to 'processed'
+                    await update_component_status(conn, gid, aid, "processed")
+
             # Save checkpoint after processing each batch
-            # -----------------------------------------------------
-            save_checkpoint(start)
-            logging.info(f"Checkpoint saved. Last processed batch starting at index {start}.")
+            await save_checkpoint(docs[-1][0])
+
+            # Show progress of component_status at the end of each batch
+            processed_count, unprocessed_count = verify_component_count(conn)
+            logging.info(f"📊 Processed components: {processed_count}, Unprocessed components: {unprocessed_count}")
 
     # Final flush of any remaining data
     if bulk_insert_data:
@@ -342,21 +426,49 @@ async def process_batches(start_indices, rows, last_fetch_date=None):
             ''', bulk_insert_data)
             conn.commit()
 
-    logging.info(f"✅ Total processed components: {total_processed}")
-    logging.info(f"❌ Total failed batches/artifacts: {total_failed}")
     conn.close()
 
-def main():
-    parser = argparse.ArgumentParser(description="Fetch all Maven components using Maven Central API.")
-    parser.add_argument("--restart", action="store_true", help="Restart from beginning and clear components.")
-    parser.add_argument("--batch-size", type=int, default=500, help="Specify batch size for component fetching.")
-    parser.add_argument("--max-workers", type=int, default=5, help="Specify the number of concurrent threads.")
-    parser.add_argument("--log-file", type=str, default="component_fetch_log.txt", help="Specify log file name.")
-    parser.add_argument("--start-index", type=int, default=None, help="Specify the starting index for batch fetching.")
-    parser.add_argument("--retry-failed", action="store_true", help="Retry previously failed batches.")
-    parser.add_argument("--incremental", action="store_true", help="Fetch only new or updated components.")
-    args = parser.parse_args()
+# Update the following functions to use the db_lock
+async def record_failed_batch(conn, group_id, artifact_id, reason):
+    async with db_lock:  # Ensures only one operation modifies the DB at a time
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO failed_batches (group_id, artifact_id, reason)
+            VALUES (?, ?, ?)
+        ''', (group_id, artifact_id, reason))
+        conn.commit()
 
+
+async def update_component_status(conn, group_id, artifact_id, status):
+    async with db_lock:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO component_status (group_id, artifact_id, status)
+            VALUES (?, ?, ?)
+        ''', (group_id, artifact_id, status))
+        conn.commit()
+
+def fetch_unprocessed_components(conn, limit):
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT group_id, artifact_id FROM component_status
+        WHERE status = 'unprocessed'
+        LIMIT ?
+    ''', (limit,))
+    return cursor.fetchall()
+
+def verify_component_count(conn):
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM component_status WHERE status = 'unprocessed'")
+    unprocessed_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM component_status WHERE status = 'processed'")
+    processed_count = cursor.fetchone()[0]
+    logging.info(f"📊 Total components in component_status table: {processed_count + unprocessed_count}")
+    logging.info(f"📊 Processed components: {processed_count}")
+    logging.info(f"📊 Unprocessed components: {unprocessed_count}")
+    return processed_count, unprocessed_count
+
+async def async_main(args):
     setup_logging(args.log_file)
     conn = init_db()
 
@@ -392,7 +504,7 @@ def main():
         # Full fetch: get total number of components
         params = {"q": "*:*", "rows": 1, "wt": "json"}
         initial_response = requests.get("https://search.maven.org/solrsearch/select", params=params)
-        if initial_response.status_code == 200:
+        if (initial_response.status_code == 200):
             total_docs = initial_response.json().get("response", {}).get("numFound", 0)
             logging.info(f"📊 Total components to fetch: {total_docs}")
         else:
@@ -419,15 +531,25 @@ def main():
     rows = args.batch_size
     # If user supplied a --start-index, use that; otherwise load from the checkpoint
     start_index = args.start_index if args.start_index is not None else load_checkpoint()
-    start_indices = list(range(start_index, total_docs, rows))
+    if not isinstance(start_index, str):
+        logging.error(f"Invalid start index: {start_index}. Resetting to empty string.")
+        start_index = ""
 
-    # Process the batches
-    asyncio.run(process_batches(start_indices, rows, last_fetch_date))
+    # Skip component population if the argument is provided
+    if not args.skip_component_population:
+        # Fetch all components and store them as unprocessed
+        async with aiohttp.ClientSession() as session:
+            await fetch_all_components(session, start_index, rows)
 
-    # If we did an incremental fetch, update the last fetch date
+        # Verify the count of components in the component_status table
+        verify_component_count(conn)
+
+    # Process the batches (in an event loop)
+    await process_batches(rows)
+
+    # If we did an incremental fetch, update the last fetch date with a buffer
     if args.incremental:
-        # NEW: Use a small buffer so we don't miss anything that might appear at the boundary
-        time_buffer_seconds = 60  # 1 minute buffer
+        time_buffer_seconds = 60
         new_fetch_date = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ",
             time.gmtime(time.time() - time_buffer_seconds)
@@ -437,6 +559,20 @@ def main():
 
     logging.info("✅ All batches processed.")
     conn.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch all Maven components using Maven Central API.")
+    parser.add_argument("--restart", action="store_true", help="Restart from beginning and clear components.")
+    parser.add_argument("--batch-size", type=int, default=20, help="Specify batch size for component fetching.")
+    parser.add_argument("--max-workers", type=int, default=5, help="Specify the number of concurrent threads (currently not used for concurrency).")
+    parser.add_argument("--log-file", type=str, default="component_fetch_log.txt", help="Specify log file name.")
+    parser.add_argument("--start-index", type=int, default=None, help="Specify the starting index for batch fetching.")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry previously failed batches.")
+    parser.add_argument("--incremental", action="store_true", help="Fetch only new or updated components.")
+    parser.add_argument("--skip-component-population", action="store_true", help="Skip the component population and move directly to the version collection.")
+    args = parser.parse_args()
+
+    asyncio.run(async_main(args))
 
 if __name__ == "__main__":
     main()

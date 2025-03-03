@@ -5,3 +5,5 @@ checkpoint_vulnerabilities.json
 fetch_log.txt
 vuln_population.log
 FromAWS/*
+VulnDBProject.code-workspace
+vulnerabilities.db.back

@@ -395,7 +395,14 @@
                 order: [[3, 'desc']],
                 pageLength: 25,
                 columns: [
-                    { data: 'cve',       defaultContent: '' },
+                    { data: 'cve', defaultContent: '',
+                      render: v => {
+                        if (!v) return '';
+                        const url = v.startsWith('CVE-')
+                          ? `https://nvd.nist.gov/vuln/detail/${v}`
+                          : `https://osv.dev/vulnerability/${v}`;
+                        return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${v}</a>`;
+                      }},
                     { data: 'publisher', defaultContent: '' },
                     { data: 'product',   defaultContent: '' },
                     { data: 'cvss_score', defaultContent: '0' },

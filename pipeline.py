@@ -152,7 +152,24 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                 })
 
     df = pd.DataFrame(rows)
-    log.info(f"Parsed {len(df):,} vulnerability-package rows")
+    log.info(f"Parsed {len(df):,} vulnerability-package rows (pre-dedup)")
+
+    # A single OSV record can have multiple affected entries for the same package
+    # (e.g. separate version ranges for 10.x and 11.x). Collapse them into one
+    # row per CVE+package, merging version lists and taking the best fixed version.
+    key = ["osv_id", "group_id", "artifact_id"]
+    scalar_cols = ["cve", "summary", "cvss_score", "severity", "published_date"]
+    scalars = df.groupby(key)[scalar_cols].first()
+    merged_versions = df.groupby(key)["versions"].apply(
+        lambda s: list({v for vlist in s for v in vlist})
+    )
+    best_fix = df.groupby(key)["fixed_version"].apply(
+        lambda s: _max_version([v for v in s if v]) or ""
+    )
+    df = scalars.join(merged_versions).join(best_fix).reset_index()
+    df["num_affected_versions"] = df["versions"].apply(len)
+
+    log.info(f"Parsed {len(df):,} vulnerability-package rows (post-dedup)")
     return df
 
 

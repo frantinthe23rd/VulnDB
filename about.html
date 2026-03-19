@@ -202,7 +202,7 @@
     <table>
         <thead><tr><th>Component</th><th>Technology</th><th>Purpose</th></tr></thead>
         <tbody>
-            <tr><td><strong>Pipeline</strong></td><td>Python 3.12 · pandas · seaborn · boto3</td><td>Download, parse, score, generate outputs</td></tr>
+            <tr><td><strong>Pipeline</strong></td><td>Python 3.12 · pandas · boto3</td><td>Download, parse, score, generate outputs</td></tr>
             <tr><td><strong>Compute</strong></td><td>AWS Lambda (container, 3 GB)</td><td>Runs the pipeline on demand and on schedule</td></tr>
             <tr><td><strong>Container Registry</strong></td><td>Amazon ECR</td><td>Stores the pipeline Docker image</td></tr>
             <tr><td><strong>Schedule</strong></td><td>Amazon EventBridge Scheduler</td><td>Triggers Lambda every Monday 06:00 UTC</td></tr>

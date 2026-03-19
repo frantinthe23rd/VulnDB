@@ -279,5 +279,11 @@ def main():
     log.info("Pipeline complete ✓")
 
 
+def handler(event, context):
+    """AWS Lambda entry point."""
+    main()
+    return {"statusCode": 200, "body": "Pipeline complete"}
+
+
 if __name__ == "__main__":
     main()

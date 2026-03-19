@@ -9,12 +9,6 @@ on:
       - 'requirements.txt'
   workflow_dispatch:
 
-env:
-  AWS_REGION: eu-west-2
-  ECR_REPOSITORY: vulndb-pipeline
-  LAMBDA_FUNCTION: vulndb-pipeline
-  LAMBDA_ROLE: arn:aws:iam::REDACTED:role/vulndb-pipeline-role
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -27,7 +21,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-west-2
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Log in to Amazon ECR
         id: login-ecr
@@ -38,7 +32,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:latest
+          IMAGE_URI=$ECR_REGISTRY/${{ vars.ECR_REPOSITORY }}:latest
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
           echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
@@ -47,21 +41,21 @@ jobs:
         env:
           IMAGE_URI: ${{ steps.build.outputs.image }}
         run: |
-          if aws lambda get-function --function-name $LAMBDA_FUNCTION --region $AWS_REGION > /dev/null 2>&1; then
+          if aws lambda get-function --function-name ${{ vars.LAMBDA_FUNCTION }} --region ${{ vars.AWS_REGION }} > /dev/null 2>&1; then
             echo "Updating existing Lambda..."
             aws lambda update-function-code \
-              --function-name $LAMBDA_FUNCTION \
+              --function-name ${{ vars.LAMBDA_FUNCTION }} \
               --image-uri $IMAGE_URI \
-              --region $AWS_REGION
+              --region ${{ vars.AWS_REGION }}
           else
             echo "Creating Lambda for the first time..."
             aws lambda create-function \
-              --function-name $LAMBDA_FUNCTION \
+              --function-name ${{ vars.LAMBDA_FUNCTION }} \
               --package-type Image \
               --code ImageUri=$IMAGE_URI \
-              --role $LAMBDA_ROLE \
+              --role ${{ secrets.LAMBDA_ROLE_ARN }} \
               --timeout 900 \
               --memory-size 3008 \
-              --environment "Variables={S3_BUCKET=vulndb-dashboard,CLOUDFRONT_DISTRIBUTION_ID=${{ secrets.VULNDB_CF_DISTRIBUTION_ID }}}" \
-              --region $AWS_REGION
+              --environment "Variables={S3_BUCKET=${{ vars.S3_BUCKET }},CLOUDFRONT_DISTRIBUTION_ID=${{ secrets.VULNDB_CF_DISTRIBUTION_ID }}}" \
+              --region ${{ vars.AWS_REGION }}
           fi

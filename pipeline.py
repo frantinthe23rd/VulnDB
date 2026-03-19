@@ -27,8 +27,8 @@ import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
 OSV_URL    = "https://osv-vulnerabilities.storage.googleapis.com/Maven/all.zip"
-S3_BUCKET  = os.environ.get("S3_BUCKET", "vulndb-dashboard")
-AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "eu-west-2")
+S3_BUCKET  = os.environ["S3_BUCKET"]
+AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 CF_ID      = os.environ.get("CLOUDFRONT_DISTRIBUTION_ID", "")
 
 logging.basicConfig(

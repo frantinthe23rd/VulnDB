@@ -49,6 +49,10 @@
         .card.high  .value { color: var(--high); }
         .card.med   .value { color: var(--med); }
         .card.low   .value { color: var(--low); }
+        .card[data-filter] { cursor: pointer; transition: border-color .2s, transform .1s; }
+        .card[data-filter]:hover { border-color: var(--accent); transform: translateY(-2px); }
+        .card[data-filter].active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+        .card .hint { font-size: .7rem; color: var(--border); margin-top: 4px; }
 
         section { margin-bottom: 40px; }
         .section-title { font-size: 1.1rem; font-weight: 600; color: var(--accent2); margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
@@ -166,18 +170,18 @@
     <!-- Metric cards -->
     <section id="metrics">
         <div class="cards">
-            <div class="card total"><span class="label">Total CVEs</span>   <span class="value" id="m-total">—</span></div>
-            <div class="card crit"> <span class="label">Critical</span>      <span class="value" id="m-crit">—</span></div>
-            <div class="card high"> <span class="label">High</span>          <span class="value" id="m-high">—</span></div>
-            <div class="card med">  <span class="label">Medium</span>        <span class="value" id="m-med">—</span></div>
-            <div class="card low">  <span class="label">Low</span>           <span class="value" id="m-low">—</span></div>
-            <div class="card total"><span class="label">Packages</span>      <span class="value" id="m-pkgs">—</span></div>
+            <div class="card total"><span class="label">Total CVEs</span><span class="value" id="m-total">—</span></div>
+            <div class="card crit" data-filter="CRITICAL"><span class="label">Critical</span><span class="value" id="m-crit">—</span><span class="hint">click to filter</span></div>
+            <div class="card high" data-filter="HIGH">    <span class="label">High</span>    <span class="value" id="m-high">—</span><span class="hint">click to filter</span></div>
+            <div class="card med"  data-filter="MEDIUM">  <span class="label">Medium</span>  <span class="value" id="m-med">—</span> <span class="hint">click to filter</span></div>
+            <div class="card low"  data-filter="LOW">     <span class="label">Low</span>     <span class="value" id="m-low">—</span> <span class="hint">click to filter</span></div>
+            <div class="card total"><span class="label">Packages</span><span class="value" id="m-pkgs">—</span></div>
         </div>
     </section>
 
     <!-- Methodology -->
     <section id="methodology">
-        <details>
+        <details open>
             <div class="methodology">
                 <summary>How is Risk Score calculated?</summary>
                 <div class="methodology-body">
@@ -210,19 +214,29 @@
 
     <!-- Top 10 bar chart -->
     <section id="top10">
-        <h2 class="section-title">Top 10 by Risk Score (last 24 months, severity-weighted)</h2>
-        <div class="chart-wrap">
-            <canvas id="top10Chart" height="90"></canvas>
-        </div>
+        <details open>
+            <summary class="section-title" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
+                <span style="font-size:.7rem;color:var(--muted)">▶</span>
+                Top 10 by Risk Score — click a bar to filter vulnerabilities
+            </summary>
+            <div class="chart-wrap" style="margin-top:16px">
+                <canvas id="top10Chart" height="90"></canvas>
+            </div>
+        </details>
     </section>
 
     <!-- Heatmap -->
     <section id="heatmap">
-        <h2 class="section-title">Top 20 by Risk Score — CVE Count by Year</h2>
-        <div class="heatmap-wrap">
-            <img id="heatmapImg" src="" alt="Vulnerability Heatmap">
-            <br><a href="images/vulnerability_heatmap.png" download>Download heatmap</a>
-        </div>
+        <details>
+            <summary class="section-title" style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px">
+                <span style="font-size:.7rem;color:var(--muted)">▶</span>
+                CVE Count by Year Heatmap (top 20 by risk score)
+            </summary>
+            <div class="heatmap-wrap" style="margin-top:16px">
+                <img id="heatmapImg" src="" alt="Vulnerability Heatmap">
+                <br><a href="images/vulnerability_heatmap.png" download>Download heatmap</a>
+            </div>
+        </details>
     </section>
 
     <!-- Summary table -->
@@ -334,10 +348,11 @@
 
             // Top-10 bar chart (already sorted by risk_score from pipeline)
             const top10 = data.slice(0, 10);
+            const top10Labels = top10.map(r => r.product);
             new Chart(document.getElementById('top10Chart'), {
                 type: 'bar',
                 data: {
-                    labels: top10.map(r => r.product),
+                    labels: top10Labels,
                     datasets: [
                         { label: 'Critical', data: top10.map(r => parseInt(r.critical)||0), backgroundColor: '#ef4444' },
                         { label: 'High',     data: top10.map(r => parseInt(r.high)||0),     backgroundColor: '#f97316' },
@@ -351,6 +366,15 @@
                     scales: {
                         x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
                         y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                    },
+                    onClick: (evt, elements) => {
+                        if (elements.length > 0) {
+                            const product = top10Labels[elements[0].index];
+                            filterDetailedByProduct(product);
+                        }
+                    },
+                    onHover: (evt, elements) => {
+                        evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
                     }
                 }
             });
@@ -433,19 +457,49 @@
         }
     });
 
-    // ── Product filter ────────────────────────────────────────────────────────
-    function filterDetailedByProduct(product) {
-        if (!detailedTable) return;
-        detailedTable.column(2).search('^' + $.fn.dataTable.util.escapeRegex(product) + '$', true, false).draw();
-        document.getElementById('filter-label').textContent = product;
+    // ── Filters ───────────────────────────────────────────────────────────────
+    function showFilterBanner(label) {
+        document.getElementById('filter-label').textContent = label;
         document.getElementById('filter-banner').style.display = 'flex';
         document.getElementById('detailed').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    document.getElementById('filter-clear').addEventListener('click', function () {
+    function clearAllFilters() {
         if (!detailedTable) return;
-        detailedTable.column(2).search('').draw();
+        detailedTable.column(2).search('');   // product
+        detailedTable.column(4).search('');   // severity
+        detailedTable.draw();
         document.getElementById('filter-banner').style.display = 'none';
+        document.querySelectorAll('.card[data-filter]').forEach(c => c.classList.remove('active'));
+    }
+
+    function filterDetailedByProduct(product) {
+        if (!detailedTable) return;
+        clearAllFilters();
+        detailedTable.column(2).search('^' + $.fn.dataTable.util.escapeRegex(product) + '$', true, false).draw();
+        showFilterBanner('Product: ' + product);
+    }
+
+    function filterDetailedBySeverity(severity) {
+        if (!detailedTable) return;
+        clearAllFilters();
+        detailedTable.column(4).search('^' + severity + '$', true, false).draw();
+        document.querySelector(`.card[data-filter="${severity}"]`)?.classList.add('active');
+        showFilterBanner('Severity: ' + severity);
+    }
+
+    document.getElementById('filter-clear').addEventListener('click', clearAllFilters);
+
+    // Card click handlers
+    document.querySelectorAll('.card[data-filter]').forEach(card => {
+        card.addEventListener('click', function () {
+            const severity = this.dataset.filter;
+            if (this.classList.contains('active')) {
+                clearAllFilters();
+            } else {
+                filterDetailedBySeverity(severity);
+            }
+        });
     });
 
 })();

@@ -119,7 +119,7 @@
         <li><strong>Parse</strong> — Each JSON record is parsed to extract the CVE ID, CVSS score, severity, published date, affected versions, and fixed version.</li>
         <li><strong>Score</strong> — CVSS scores are extracted from three sources in priority order: <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">database_specific.cvss_score</code>, the CVSS vector string (parsed using the <em>cvss</em> library), or the severity label as a fallback.</li>
         <li><strong>Aggregate</strong> — Records are grouped by <em>group_id:artifact_id</em> (Maven coordinates) to produce per-package summaries.</li>
-        <li><strong>Generate</strong> — Two CSVs, a heatmap image, and a metadata JSON are written to <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">/tmp</code>.</li>
+        <li><strong>Generate</strong> — Two CSVs and a metadata JSON are written to <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">/tmp</code>.</li>
         <li><strong>Upload</strong> — All outputs are uploaded to an S3 bucket. A CloudFront cache invalidation ensures the website reflects the new data immediately.</li>
     </ol>
     <p>
@@ -206,7 +206,7 @@
             <tr><td><strong>Compute</strong></td><td>AWS Lambda (container, 3 GB)</td><td>Runs the pipeline on demand and on schedule</td></tr>
             <tr><td><strong>Container Registry</strong></td><td>Amazon ECR</td><td>Stores the pipeline Docker image</td></tr>
             <tr><td><strong>Schedule</strong></td><td>Amazon EventBridge Scheduler</td><td>Triggers Lambda every Monday 06:00 UTC</td></tr>
-            <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, heatmap, metadata, and this website</td></tr>
+            <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, metadata, and this website</td></tr>
             <tr><td><strong>CDN</strong></td><td>Amazon CloudFront</td><td>HTTPS delivery and edge caching</td></tr>
             <tr><td><strong>CI/CD</strong></td><td>GitHub Actions</td><td>Builds and deploys Lambda image on code push; deploys HTML on content change</td></tr>
         </tbody>

@@ -129,6 +129,18 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                     continue
                 group_id, artifact_id = name_field.split(":", 1)
                 versions = affected.get("versions", [])
+
+                # Extract fixed version from ranges
+                fixed_ver = ""
+                for r in affected.get("ranges", []):
+                    if r.get("type") in ("ECOSYSTEM", "SEMVER"):
+                        for event in r.get("events", []):
+                            if "fixed" in event:
+                                fixed_ver = event["fixed"]
+                                break
+                    if fixed_ver:
+                        break
+
                 rows.append({
                     "osv_id":            rec["id"],
                     "cve":               cve,
@@ -140,11 +152,28 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                     "published_date":    pub,
                     "versions":          versions,
                     "num_affected_versions": len(versions),
+                    "fixed_version":     fixed_ver,
                 })
 
     df = pd.DataFrame(rows)
     log.info(f"Parsed {len(df):,} vulnerability-package rows")
     return df
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _max_version(versions: list) -> str:
+    """Return the highest version string using semver-aware comparison."""
+    from packaging.version import Version, InvalidVersion
+    parsed = []
+    for v in versions:
+        try:
+            parsed.append((Version(v), v))
+        except InvalidVersion:
+            pass
+    if not parsed:
+        return ""
+    return max(parsed, key=lambda t: t[0])[1]
 
 
 # ── Stage 3: Generate outputs ─────────────────────────────────────────────────
@@ -156,37 +185,67 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
     # ── Detailed CSV
     detailed = df[[
         "group_id", "artifact_id", "cve", "cvss_score", "severity",
-        "published_date", "summary", "num_affected_versions"
+        "published_date", "summary", "num_affected_versions", "fixed_version"
     ]].rename(columns={"group_id": "publisher", "artifact_id": "product"})
     detailed.to_csv(f"{out_dir}/csv/vulnerability_detailed.csv", index=False)
     log.info("Detailed CSV written")
 
     # ── Summary CSV
+    two_years_ago = (datetime.now(timezone.utc) - pd.Timedelta(days=730)).strftime("%Y-%m-%d")
+    one_year_ago  = (datetime.now(timezone.utc) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
+
+    df["is_recent"]    = df["published_date"] >= two_years_ago
+    df["is_last_year"] = df["published_date"] >= one_year_ago
+    df["is_prev_year"] = (df["published_date"] >= two_years_ago) & (df["published_date"] < one_year_ago)
+    df["sev_weight"]   = df["severity"].map({"CRITICAL": 4, "HIGH": 2, "MEDIUM": 1, "LOW": 0}).fillna(0)
+    df["recent_sev_weight"] = df["sev_weight"] * df["is_recent"].astype(int)
+
     def sev_count(series, label):
         return int((series == label).sum())
 
     summary = (
         df.groupby(["group_id", "artifact_id"])
         .agg(
-            total_vulnerabilities=("osv_id",    "count"),
-            critical             =("severity",  lambda x: sev_count(x, "CRITICAL")),
-            high                 =("severity",  lambda x: sev_count(x, "HIGH")),
-            medium               =("severity",  lambda x: sev_count(x, "MEDIUM")),
-            low                  =("severity",  lambda x: sev_count(x, "LOW")),
-            avg_cvss             =("cvss_score","mean"),
-            latest_vuln_date     =("published_date","max"),
-            total_affected_versions=("versions", lambda x: len(set(v for vlist in x for v in vlist))),
+            total_vulnerabilities  =("osv_id",           "count"),
+            critical               =("severity",          lambda x: sev_count(x, "CRITICAL")),
+            high                   =("severity",          lambda x: sev_count(x, "HIGH")),
+            medium                 =("severity",          lambda x: sev_count(x, "MEDIUM")),
+            low                    =("severity",          lambda x: sev_count(x, "LOW")),
+            avg_cvss               =("cvss_score",        "mean"),
+            latest_vuln_date       =("published_date",    "max"),
+            total_affected_versions=("versions",          lambda x: len(set(v for vlist in x for v in vlist))),
+            recent_cves            =("is_recent",         "sum"),
+            last_year_cves         =("is_last_year",      "sum"),
+            prev_year_cves         =("is_prev_year",      "sum"),
+            risk_score             =("recent_sev_weight", "sum"),
+            min_safe_version       =("fixed_version",     lambda x: _max_version(x[x != ""].tolist())),
+            unfixed_cves           =("fixed_version",     lambda x: int((x == "").sum())),
         )
         .reset_index()
         .rename(columns={"group_id": "publisher", "artifact_id": "product"})
-        .sort_values("total_vulnerabilities", ascending=False)
     )
-    summary["avg_cvss"] = summary["avg_cvss"].round(1)
-    summary.to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
+    summary["avg_cvss"]   = summary["avg_cvss"].round(1)
+    summary["risk_score"] = summary["risk_score"].astype(int)
+    summary["recent_cves"]     = summary["recent_cves"].astype(int)
+    summary["last_year_cves"]  = summary["last_year_cves"].astype(int)
+    summary["prev_year_cves"]  = summary["prev_year_cves"].astype(int)
+    summary["trend"] = summary.apply(
+        lambda r: "up"   if r["last_year_cves"] > r["prev_year_cves"] else
+                  "down" if r["last_year_cves"] < r["prev_year_cves"] else "flat",
+        axis=1,
+    )
+    summary = summary.sort_values("risk_score", ascending=False)
+    summary[[
+        "publisher", "product", "risk_score", "total_vulnerabilities",
+        "recent_cves", "last_year_cves", "prev_year_cves", "trend",
+        "critical", "high", "medium", "low",
+        "avg_cvss", "latest_vuln_date", "total_affected_versions",
+        "min_safe_version", "unfixed_cves",
+    ]].to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
     log.info("Summary CSV written")
 
-    # ── Heatmap (top 20 packages × year)
-    top20 = summary.nlargest(20, "total_vulnerabilities")["product"].tolist()
+    # ── Heatmap (top 20 packages × year) — ranked by risk_score
+    top20 = summary.nlargest(20, "risk_score")["product"].tolist()
     heat_df = df[df["artifact_id"].isin(top20)].copy()
     heat_df["year"] = heat_df["published_date"].str[:4]
     heat_df = heat_df[heat_df["year"].str.fullmatch(r"\d{4}", na=False)]

@@ -5,6 +5,7 @@ on:
     branches: [main, master]
     paths:
       - 'index.html'
+      - 'about.html'
       - 'images/background.png'
 
 jobs:
@@ -21,11 +22,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-west-2
 
-      - name: Upload index.html to S3
+      - name: Upload HTML files to S3
         run: |
-          aws s3 cp index.html s3://vulndb-dashboard/index.html \
-            --content-type text/html \
-            --cache-control "max-age=300"
+          for f in index.html about.html; do
+            [ -f "$f" ] && aws s3 cp $f s3://vulndb-dashboard/$f \
+              --content-type text/html \
+              --cache-control "max-age=300"
+          done
 
       - name: Invalidate CloudFront cache
         run: |

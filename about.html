@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About — Maven Vulnerability Dashboard</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg:      #0f172a;
+            --surface: #1e293b;
+            --border:  #334155;
+            --accent:  #38bdf8;
+            --accent2: #f59e0b;
+            --text:    #e2e8f0;
+            --muted:   #94a3b8;
+            --crit:    #ef4444;
+            --high:    #f97316;
+            --med:     #eab308;
+            --low:     #22c55e;
+        }
+
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        header {
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 0 2vw; display: flex; align-items: center; justify-content: space-between;
+            height: 60px; position: sticky; top: 0; z-index: 100;
+        }
+        header h1 { font-size: 1.25rem; color: var(--accent); }
+        .nav { display: flex; gap: 20px; list-style: none; }
+        .nav a { color: var(--muted); text-decoration: none; font-size: .9rem; transition: color .2s; }
+        .nav a:hover, .nav a.active { color: var(--text); }
+
+        main { max-width: 900px; margin: 0 auto; padding: 48px 24px; }
+
+        h2 { font-size: 1.4rem; color: var(--accent2); margin-bottom: 12px; margin-top: 40px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        h2:first-of-type { margin-top: 0; }
+        h3 { font-size: 1rem; color: var(--accent); margin: 20px 0 8px; }
+
+        p { color: var(--muted); line-height: 1.75; margin-bottom: 12px; font-size: .925rem; }
+        p strong { color: var(--text); }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        ul, ol { padding-left: 20px; margin-bottom: 12px; }
+        li { color: var(--muted); line-height: 1.75; font-size: .925rem; margin-bottom: 4px; }
+        li strong { color: var(--text); }
+
+        .card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-left: 4px solid var(--accent2); border-radius: 12px;
+            padding: 20px 24px; margin: 20px 0;
+        }
+        .card.info  { border-left-color: var(--accent); }
+        .card.warn  { border-left-color: var(--high); }
+
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: .9rem; }
+        th { background: #0f172a; color: var(--accent); padding: 10px 14px; text-align: left; border-bottom: 2px solid var(--border); }
+        td { padding: 9px 14px; border-bottom: 1px solid var(--border); color: var(--muted); }
+        tr:hover td { background: #263045; }
+        td strong { color: var(--text); }
+
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
+        .badge-crit { background: #450a0a; color: var(--crit); }
+        .badge-high { background: #431407; color: var(--high); }
+        .badge-med  { background: #422006; color: var(--med); }
+        .badge-low  { background: #052e16; color: var(--low); }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Maven Vulnerability Dashboard</h1>
+    <nav>
+        <ul class="nav">
+            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="about.html" class="active">About</a></li>
+        </ul>
+    </nav>
+</header>
+
+<main>
+
+    <h2>What is this?</h2>
+    <p>
+        This dashboard surfaces the Maven (Java) open-source components that are currently the most active in terms of
+        known security vulnerabilities. The goal is to help engineering teams make <strong>informed adoption decisions</strong>
+        — not to discourage use of open source, but to highlight components that warrant closer scrutiny or an upgrade before use.
+    </p>
+    <p>
+        Data is refreshed automatically <strong>every Monday at 06:00 UTC</strong> and deployed to this site within minutes of the pipeline completing.
+    </p>
+
+    <h2>Data Source</h2>
+    <p>
+        All vulnerability data is sourced from the <strong><a href="https://osv.dev" target="_blank" rel="noopener">Open Source Vulnerabilities (OSV)</a></strong>
+        database, maintained by Google. OSV aggregates vulnerability data from multiple authoritative sources including:
+    </p>
+    <ul>
+        <li><strong>NVD</strong> — NIST National Vulnerability Database (the primary CVE registry)</li>
+        <li><strong>GitHub Advisory Database</strong> — security advisories published by GitHub</li>
+        <li><strong>Package maintainers</strong> — direct disclosures via the OSV schema</li>
+    </ul>
+    <p>
+        The pipeline downloads the complete Maven ecosystem bulk export from
+        <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">osv-vulnerabilities.storage.googleapis.com/Maven/all.zip</code>
+        — a single file containing all known Maven CVEs. No API key is required.
+    </p>
+    <div class="card info">
+        <strong>Scope:</strong> Maven (Java) ecosystem only. Other ecosystems (npm, PyPI, Go, etc.) are not currently included
+        but use the same OSV data source and could be added in future.
+    </div>
+
+    <h2>How the Pipeline Works</h2>
+    <ol>
+        <li><strong>Download</strong> — The OSV Maven bulk ZIP (~150 MB) is downloaded into memory.</li>
+        <li><strong>Parse</strong> — Each JSON record is parsed to extract the CVE ID, CVSS score, severity, published date, affected versions, and fixed version.</li>
+        <li><strong>Score</strong> — CVSS scores are extracted from three sources in priority order: <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">database_specific.cvss_score</code>, the CVSS vector string (parsed using the <em>cvss</em> library), or the severity label as a fallback.</li>
+        <li><strong>Aggregate</strong> — Records are grouped by <em>group_id:artifact_id</em> (Maven coordinates) to produce per-package summaries.</li>
+        <li><strong>Generate</strong> — Two CSVs, a heatmap image, and a metadata JSON are written to <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">/tmp</code>.</li>
+        <li><strong>Upload</strong> — All outputs are uploaded to an S3 bucket. A CloudFront cache invalidation ensures the website reflects the new data immediately.</li>
+    </ol>
+    <p>
+        The pipeline runs as an <strong>AWS Lambda function</strong> (container image, 3 GB RAM, 15-minute timeout)
+        triggered by an <strong>EventBridge schedule</strong>. The Lambda image is built and deployed automatically
+        via <strong>GitHub Actions</strong> whenever the pipeline code changes.
+    </p>
+
+    <h2>Risk Score</h2>
+    <p>
+        Raw CVE count is a poor adoption signal because it heavily favours old, widely-used components that have simply accumulated
+        history. A component with 300 CVEs published over 15 years is very different from one with 20 CVEs published in the last 12 months.
+    </p>
+    <p>The <strong>Risk Score</strong> is designed to capture <em>current</em> risk:</p>
+    <div class="card">
+        <strong>Risk Score = (Critical × 4) + (High × 2) + (Medium × 1)</strong><br>
+        <span style="color:var(--muted);font-size:.875rem">…counting only CVEs published in the last 24 months</span>
+    </div>
+    <table>
+        <thead><tr><th>Severity</th><th>CVSS Range</th><th>Weight</th><th>Rationale</th></tr></thead>
+        <tbody>
+            <tr><td><span class="badge badge-crit">CRITICAL</span></td><td>9.0 – 10.0</td><td>4</td><td>Remote code execution, authentication bypass — immediate action required</td></tr>
+            <tr><td><span class="badge badge-high">HIGH</span></td>    <td>7.0 – 8.9</td><td>2</td><td>Significant impact, exploitable with moderate effort</td></tr>
+            <tr><td><span class="badge badge-med">MEDIUM</span></td>   <td>4.0 – 6.9</td><td>1</td><td>Limited impact or requires specific conditions to exploit</td></tr>
+            <tr><td><span class="badge badge-low">LOW</span></td>      <td>0.1 – 3.9</td><td>0</td><td>Minimal practical impact</td></tr>
+        </tbody>
+    </table>
+    <p>
+        A component scoring <strong>0</strong> has had no medium-or-above CVEs in the last two years — regardless of its
+        historical total. A high score indicates active, severe vulnerability activity worth investigating before adoption.
+    </p>
+
+    <h2>Trend</h2>
+    <p>
+        The <strong>Trend</strong> column compares the CVE count in the most recent 12 months against the prior 12 months:
+    </p>
+    <ul>
+        <li><strong style="color:var(--crit)">↑ Increasing</strong> — more CVEs in the last 12 months than the previous 12. The component is getting noisier.</li>
+        <li><strong style="color:var(--low)">↓ Decreasing</strong> — fewer recent CVEs. May indicate improving security posture or reduced scrutiny.</li>
+        <li><strong style="color:var(--muted)">→ Stable</strong> — no change between periods.</li>
+    </ul>
+
+    <h2>Min Safe Version &amp; Unfixed CVEs</h2>
+    <p>
+        OSV records include a <strong>fixed version</strong> for each CVE where one has been published by the maintainer.
+        The <strong>Min Safe Version</strong> shown in the summary is the highest fixed version referenced across all CVEs
+        for that package — upgrading to this version or above addresses the maximum number of known vulnerabilities.
+    </p>
+    <p>
+        <strong>Unfixed CVEs</strong> counts CVEs for which OSV records <em>no</em> fixed version. This could mean:
+    </p>
+    <ul>
+        <li>The vulnerability has not yet been patched by the maintainer</li>
+        <li>The fix exists but has not been recorded in OSV (OSV data lags behind in some cases)</li>
+        <li>The component is abandoned and no fix is planned</li>
+    </ul>
+    <div class="card warn">
+        <strong>Important limitation:</strong> Fixed version data in OSV is only as complete as what maintainers and reporters
+        have submitted. A blank "Fixed In" field does not definitively mean no fix exists — always check the upstream
+        project and NVD directly for the latest status.
+    </div>
+
+    <h2>Affected Versions</h2>
+    <p>
+        The <strong>Affected Versions</strong> count in the summary is the number of <em>distinct</em> version strings
+        that appear in at least one CVE's affected list for that package. It is deduplicated across all CVEs —
+        so a version affected by five different CVEs is counted once.
+    </p>
+
+    <h2>Limitations</h2>
+    <ul>
+        <li><strong>OSV completeness</strong> — OSV does not capture every vulnerability. Some disclosures appear only in NVD or vendor advisories before being ingested into OSV. The pipeline reflects OSV's current state at the time of the weekly run.</li>
+        <li><strong>CVSS accuracy</strong> — CVSS scores are taken from OSV records which may use NVD scores, maintainer-supplied scores, or be inferred from severity labels. Scores can change as NVD re-analyses CVEs.</li>
+        <li><strong>Transitive dependencies</strong> — Components like <em>commons-codec</em> or <em>slf4j-api</em> may appear with high CVE counts despite being low-risk in practice, because they are almost always pulled in as transitive dependencies rather than chosen directly.</li>
+        <li><strong>Maven only</strong> — Only the Maven ecosystem is currently covered. Node.js (npm), Python (PyPI), and other ecosystems are not included.</li>
+        <li><strong>Fixed version lag</strong> — Fixed version data may lag behind actual patch releases by days or weeks depending on how quickly maintainers update OSV records.</li>
+    </ul>
+
+    <h2>Infrastructure</h2>
+    <table>
+        <thead><tr><th>Component</th><th>Technology</th><th>Purpose</th></tr></thead>
+        <tbody>
+            <tr><td><strong>Pipeline</strong></td><td>Python 3.12 · pandas · seaborn · boto3</td><td>Download, parse, score, generate outputs</td></tr>
+            <tr><td><strong>Compute</strong></td><td>AWS Lambda (container, 3 GB)</td><td>Runs the pipeline on demand and on schedule</td></tr>
+            <tr><td><strong>Container Registry</strong></td><td>Amazon ECR</td><td>Stores the pipeline Docker image</td></tr>
+            <tr><td><strong>Schedule</strong></td><td>Amazon EventBridge Scheduler</td><td>Triggers Lambda every Monday 06:00 UTC</td></tr>
+            <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, heatmap, metadata, and this website</td></tr>
+            <tr><td><strong>CDN</strong></td><td>Amazon CloudFront</td><td>HTTPS delivery and edge caching</td></tr>
+            <tr><td><strong>CI/CD</strong></td><td>GitHub Actions</td><td>Builds and deploys Lambda image on code push; deploys HTML on content change</td></tr>
+        </tbody>
+    </table>
+
+</main>
+</body>
+</html>

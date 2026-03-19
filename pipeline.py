@@ -128,7 +128,7 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                 if ":" not in name_field:
                     continue
                 group_id, artifact_id = name_field.split(":", 1)
-                num_versions = len(affected.get("versions", []))
+                versions = affected.get("versions", [])
                 rows.append({
                     "osv_id":            rec["id"],
                     "cve":               cve,
@@ -138,7 +138,8 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                     "cvss_score":        cvss,
                     "severity":          sev,
                     "published_date":    pub,
-                    "num_affected_versions": num_versions,
+                    "versions":          versions,
+                    "num_affected_versions": len(versions),
                 })
 
     df = pd.DataFrame(rows)
@@ -174,7 +175,7 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
             low                  =("severity",  lambda x: sev_count(x, "LOW")),
             avg_cvss             =("cvss_score","mean"),
             latest_vuln_date     =("published_date","max"),
-            total_affected_versions=("num_affected_versions","sum"),
+            total_affected_versions=("versions", lambda x: len(set(v for vlist in x for v in vlist))),
         )
         .reset_index()
         .rename(columns={"group_id": "publisher", "artifact_id": "product"})

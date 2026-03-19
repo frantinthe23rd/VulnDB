@@ -164,6 +164,27 @@
         .dl-link a { color: var(--accent); font-size: .85rem; text-decoration: none; }
         .dl-link a:hover { text-decoration: underline; }
 
+        /* clickable product link in table */
+        .product-link { color: var(--accent); cursor: pointer; text-decoration: none; border-bottom: 1px dashed var(--accent); }
+        .product-link:hover { color: #fff; border-bottom-color: #fff; }
+
+        /* active filter banner */
+        #filter-banner {
+            display: none;
+            background: #1e3a5f;
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            font-size: .875rem;
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+        }
+        #filter-banner span { color: var(--accent); }
+        #filter-clear { background: none; border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: .8rem; }
+        #filter-clear:hover { background: var(--accent); color: #0f172a; }
+
         /* loading state */
         .loading { color: var(--muted); font-size: .9rem; padding: 20px; text-align: center; }
     </style>
@@ -243,6 +264,10 @@
     <section id="detailed">
         <h2 class="section-title">Detailed Vulnerabilities</h2>
         <div class="dl-link"><a href="csv/vulnerability_detailed.csv" download>Download CSV</a></div>
+        <div id="filter-banner">
+            <span>Filtered: <strong id="filter-label"></strong></span>
+            <button id="filter-clear">Clear filter</button>
+        </div>
         <div class="dt-wrap">
             <div class="loading" id="detailed-loading">Loading data…</div>
             <table id="detailedTable" class="display" style="display:none;width:100%">
@@ -334,7 +359,8 @@
                 pageLength: 25,
                 columns: [
                     { data: 'publisher', defaultContent: '' },
-                    { data: 'product',   defaultContent: '' },
+                    { data: 'product', defaultContent: '',
+                      render: v => `<span class="product-link" data-product="${v}">${v}</span>` },
                     { data: 'total_vulnerabilities', defaultContent: '0', render: v => parseInt(v).toLocaleString() },
                     { data: 'critical', defaultContent: '0', render: v => v > 0 ? `<span class="sev sev-CRITICAL">${v}</span>` : v },
                     { data: 'high',     defaultContent: '0', render: v => v > 0 ? `<span class="sev sev-HIGH">${v}</span>`     : v },
@@ -345,10 +371,18 @@
                     { data: 'total_affected_versions', defaultContent: '0', render: v => parseInt(v).toLocaleString() },
                 ]
             });
+
+            // Click handler: filter detailed table by product
+            $('#summaryTable tbody').on('click', '.product-link', function () {
+                const product = $(this).data('product');
+                filterDetailedByProduct(product);
+            });
         }
     });
 
     // ── Detailed CSV → table ──────────────────────────────────────────────────
+    let detailedTable = null;
+
     Papa.parse('csv/vulnerability_detailed.csv?ts=' + Date.now(), {
         download: true,
         header: true,
@@ -356,7 +390,7 @@
         complete: function (results) {
             document.getElementById('detailed-loading').style.display = 'none';
             document.getElementById('detailedTable').style.display = '';
-            $('#detailedTable').DataTable({
+            detailedTable = $('#detailedTable').DataTable({
                 data: results.data,
                 order: [[3, 'desc']],
                 pageLength: 25,
@@ -373,6 +407,23 @@
                 ]
             });
         }
+    });
+
+    // ── Product filter ────────────────────────────────────────────────────────
+    function filterDetailedByProduct(product) {
+        if (!detailedTable) return;
+        // column 2 = product
+        detailedTable.column(2).search('^' + $.fn.dataTable.util.escapeRegex(product) + '$', true, false).draw();
+        const banner = document.getElementById('filter-banner');
+        document.getElementById('filter-label').textContent = product;
+        banner.style.display = 'flex';
+        document.getElementById('detailed').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    document.getElementById('filter-clear').addEventListener('click', function () {
+        if (!detailedTable) return;
+        detailedTable.column(2).search('').draw();
+        document.getElementById('filter-banner').style.display = 'none';
     });
 })();
 </script>

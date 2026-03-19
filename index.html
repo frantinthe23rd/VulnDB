@@ -179,7 +179,7 @@
             <li><a href="#metrics">Overview</a></li>
             <li><a href="#methodology">Methodology</a></li>
             <li><a href="#top10">Top 10</a></li>
-            <li><a href="#heatmap">Heatmap</a></li>
+
             <li><a href="#summary">Summary</a></li>
             <li><a href="#detailed">Detailed</a></li>
             <li><a href="about.html">About</a></li>
@@ -241,17 +241,6 @@
             <summary>Top 10 by Risk Score — click a bar to filter vulnerabilities</summary>
             <div class="chart-wrap">
                 <canvas id="top10Chart" height="70"></canvas>
-            </div>
-        </details>
-    </section>
-
-    <!-- Heatmap -->
-    <section id="heatmap">
-        <details>
-            <summary>CVE Count by Year Heatmap (top 20 by risk score)</summary>
-            <div class="heatmap-wrap">
-                <img id="heatmapImg" src="" alt="Vulnerability Heatmap">
-                <br><a href="images/vulnerability_heatmap.png" download>Download heatmap</a>
             </div>
         </details>
     </section>
@@ -358,17 +347,14 @@
         })
         .catch(() => { document.getElementById('last-updated').textContent = ''; });
 
-    // ── Heatmap ───────────────────────────────────────────────────────────────
-    document.getElementById('heatmapImg').src = 'images/vulnerability_heatmap.png?ts=' + Date.now();
-
     // ── Summary CSV ───────────────────────────────────────────────────────────
     Papa.parse('csv/vulnerability_summary.csv?ts=' + Date.now(), {
         download: true, header: true, skipEmptyLines: true,
         complete: function (results) {
             const data = results.data;
 
-            // Top-10 chart
-            const top10 = data.slice(0, 10);
+            // Top-10 horizontal bar chart
+            const top10 = data.slice(0, 10).reverse(); // reverse so highest risk is at top
             const top10Labels = top10.map(r => r.product);
             new Chart(document.getElementById('top10Chart'), {
                 type: 'bar',
@@ -382,11 +368,22 @@
                     ]
                 },
                 options: {
+                    indexAxis: 'y',
                     responsive: true,
-                    plugins: { legend: { labels: { color: '#e2e8f0' } } },
+                    plugins: {
+                        legend: { labels: { color: '#e2e8f0' } },
+                        tooltip: {
+                            callbacks: {
+                                afterTitle: items => {
+                                    const d = top10[items[0].dataIndex];
+                                    return `Risk Score: ${d.risk_score}  |  Trend: ${d.trend}`;
+                                }
+                            }
+                        }
+                    },
                     scales: {
-                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
-                        y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' }, title: { display: true, text: 'CVE Count (recent 24 months)', color: '#94a3b8' } },
+                        y: { stacked: true, ticks: { color: '#e2e8f0', font: { size: 13 } }, grid: { color: '#334155' } }
                     },
                     onClick: (evt, elements) => {
                         if (elements.length > 0) filterDetailedByProduct(top10Labels[elements[0].index]);

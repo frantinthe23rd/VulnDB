@@ -22,12 +22,8 @@ import zipfile
 from datetime import datetime, timezone
 
 import boto3
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 import requests
-import seaborn as sns
 
 # ── Config ────────────────────────────────────────────────────────────────────
 OSV_URL    = "https://osv-vulnerabilities.storage.googleapis.com/Maven/all.zip"
@@ -179,8 +175,7 @@ def _max_version(versions: list) -> str:
 # ── Stage 3: Generate outputs ─────────────────────────────────────────────────
 
 def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
-    os.makedirs(f"{out_dir}/csv",    exist_ok=True)
-    os.makedirs(f"{out_dir}/images", exist_ok=True)
+    os.makedirs(f"{out_dir}/csv", exist_ok=True)
 
     # ── Detailed CSV
     detailed = df[[
@@ -244,41 +239,6 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
     ]].to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
     log.info("Summary CSV written")
 
-    # ── Heatmap (top 20 packages × year) — ranked by risk_score
-    top20 = summary.nlargest(20, "risk_score")["product"].tolist()
-    heat_df = df[df["artifact_id"].isin(top20)].copy()
-    heat_df["year"] = heat_df["published_date"].str[:4]
-    heat_df = heat_df[heat_df["year"].str.fullmatch(r"\d{4}", na=False)]
-
-    pivot = heat_df.pivot_table(
-        index="artifact_id", columns="year",
-        values="osv_id", aggfunc="count", fill_value=0
-    )
-    pivot = pivot.reindex(
-        pivot.sum(axis=1).sort_values(ascending=False).index
-    )
-
-    fig, ax = plt.subplots(figsize=(18, 10))
-    sns.heatmap(
-        pivot, annot=True, fmt="d", cmap="YlOrRd",
-        linewidths=0.4, linecolor="#1e293b",
-        cbar_kws={"label": "CVE Count", "shrink": 0.6},
-        ax=ax,
-    )
-    ax.set_title(
-        "Top 20 Maven Components — CVE Count by Year",
-        fontsize=15, fontweight="bold", pad=16,
-        color="#1e293b",
-    )
-    ax.set_xlabel("Year Published", fontsize=11, color="#334155")
-    ax.set_ylabel("Component (artifact ID)", fontsize=11, color="#334155")
-    ax.tick_params(axis="x", rotation=45)
-    ax.tick_params(axis="y", rotation=0)
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/images/vulnerability_heatmap.png", dpi=150, bbox_inches="tight")
-    plt.close()
-    log.info("Heatmap written")
-
     # ── Metadata JSON
     metadata = {
         "last_updated":         datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC"),
@@ -303,7 +263,6 @@ def upload_to_s3(out_dir: str = "/tmp"):
     files = [
         (f"{out_dir}/csv/vulnerability_summary.csv",  "csv/vulnerability_summary.csv",  "text/csv"),
         (f"{out_dir}/csv/vulnerability_detailed.csv", "csv/vulnerability_detailed.csv", "text/csv"),
-        (f"{out_dir}/images/vulnerability_heatmap.png", "images/vulnerability_heatmap.png", "image/png"),
         (f"{out_dir}/metadata.json",                  "metadata.json",                  "application/json"),
     ]
     for local, key, content_type in files:

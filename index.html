@@ -354,8 +354,8 @@
             const data = results.data;
 
             // Top-10 horizontal bar chart
-            const top10 = data.slice(0, 10).reverse(); // reverse so highest risk is at top
-            const top10Labels = top10.map(r => r.product);
+            const top10 = data.slice(0, 10); // already sorted highest risk first
+            const top10Labels = top10.map((r, i) => `${i + 1}. ${r.product}`);
             new Chart(document.getElementById('top10Chart'), {
                 type: 'bar',
                 data: {
@@ -386,7 +386,7 @@
                         y: { stacked: true, ticks: { color: '#e2e8f0', font: { size: 13 } }, grid: { color: '#334155' } }
                     },
                     onClick: (evt, elements) => {
-                        if (elements.length > 0) filterDetailedByProduct(top10Labels[elements[0].index]);
+                        if (elements.length > 0) filterDetailedByProduct(top10[elements[0].index].product);
                     },
                     onHover: (evt, elements) => {
                         evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';

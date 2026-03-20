@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>About — Maven Vulnerability Dashboard</title>
+    <title>About — VulnDB</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -48,6 +48,8 @@
         li { color: var(--muted); line-height: 1.75; font-size: .925rem; margin-bottom: 4px; }
         li strong { color: var(--text); }
 
+        code { background: #1e293b; padding: 2px 6px; border-radius: 4px; color: var(--accent); font-size: .875em; }
+
         .card {
             background: var(--surface); border: 1px solid var(--border);
             border-left: 4px solid var(--accent2); border-radius: 12px;
@@ -72,10 +74,10 @@
 <body>
 
 <header>
-    <h1>Maven Vulnerability Dashboard</h1>
+    <h1>VulnDB</h1>
     <nav>
         <ul class="nav">
-            <li><a href="index.html">Dashboard</a></li>
+            <li><a href="index.html">← Home</a></li>
             <li><a href="about.html" class="active">About</a></li>
         </ul>
     </nav>
@@ -85,13 +87,24 @@
 
     <h2>What is this?</h2>
     <p>
-        This dashboard surfaces the Maven (Java) open-source components that are currently the most active in terms of
-        known security vulnerabilities. The goal is to help engineering teams make <strong>informed adoption decisions</strong>
-        — not to discourage use of open source, but to highlight components that warrant closer scrutiny or an upgrade before use.
+        VulnDB surfaces open-source components that are currently the most active in terms of known security vulnerabilities,
+        across three major package ecosystems: <strong>Maven (Java)</strong>, <strong>PyPI (Python)</strong>, and <strong>npm (JavaScript)</strong>.
+        The goal is to help engineering teams make <strong>informed adoption decisions</strong> — not to discourage use of open source,
+        but to highlight components that warrant closer scrutiny or an upgrade before use.
     </p>
     <p>
         Data is refreshed automatically <strong>every Monday at 06:00 UTC</strong> and deployed to this site within minutes of the pipeline completing.
     </p>
+
+    <h2>Ecosystems</h2>
+    <table>
+        <thead><tr><th>Dashboard</th><th>Ecosystem</th><th>Package format</th><th>Example</th></tr></thead>
+        <tbody>
+            <tr><td><a href="maven.html">☕ Maven</a></td><td>Java / JVM</td><td><code>groupId:artifactId</code></td><td><code>org.apache.logging.log4j:log4j-core</code></td></tr>
+            <tr><td><a href="pypi.html">🐍 PyPI</a></td><td>Python</td><td>package name</td><td><code>requests</code>, <code>django</code></td></tr>
+            <tr><td><a href="npm.html">📦 npm</a></td><td>JavaScript / Node.js</td><td>package name</td><td><code>lodash</code>, <code>express</code></td></tr>
+        </tbody>
+    </table>
 
     <h2>Data Source</h2>
     <p>
@@ -104,23 +117,27 @@
         <li><strong>Package maintainers</strong> — direct disclosures via the OSV schema</li>
     </ul>
     <p>
-        The pipeline downloads the complete Maven ecosystem bulk export from
-        <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">osv-vulnerabilities.storage.googleapis.com/Maven/all.zip</code>
-        — a single file containing all known Maven CVEs. No API key is required.
+        The pipeline downloads a complete bulk export per ecosystem — a single ZIP file containing all known CVEs for that ecosystem.
+        No API key is required.
     </p>
-    <div class="card info">
-        <strong>Scope:</strong> Maven (Java) ecosystem only. Other ecosystems (npm, PyPI, Go, etc.) are not currently included
-        but use the same OSV data source and could be added in future.
-    </div>
+    <table>
+        <thead><tr><th>Ecosystem</th><th>OSV bulk URL</th></tr></thead>
+        <tbody>
+            <tr><td><strong>Maven</strong></td><td><code>osv-vulnerabilities.storage.googleapis.com/Maven/all.zip</code></td></tr>
+            <tr><td><strong>PyPI</strong></td><td><code>osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip</code></td></tr>
+            <tr><td><strong>npm</strong></td><td><code>osv-vulnerabilities.storage.googleapis.com/npm/all.zip</code></td></tr>
+        </tbody>
+    </table>
 
     <h2>How the Pipeline Works</h2>
+    <p>The same six-stage process runs for each ecosystem in sequence:</p>
     <ol>
-        <li><strong>Download</strong> — The OSV Maven bulk ZIP (~150 MB) is downloaded into memory.</li>
+        <li><strong>Download</strong> — The OSV bulk ZIP for the ecosystem is downloaded into memory.</li>
         <li><strong>Parse</strong> — Each JSON record is parsed to extract the CVE ID, CVSS score, severity, published date, affected versions, and fixed version.</li>
-        <li><strong>Score</strong> — CVSS scores are extracted from three sources in priority order: <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">database_specific.cvss_score</code>, the CVSS vector string (parsed using the <em>cvss</em> library), or the severity label as a fallback.</li>
-        <li><strong>Aggregate</strong> — Records are grouped by <em>group_id:artifact_id</em> (Maven coordinates) to produce per-package summaries.</li>
-        <li><strong>Generate</strong> — Two CSVs and a metadata JSON are written to <code style="background:#1e293b;padding:2px 6px;border-radius:4px;color:var(--accent)">/tmp</code>.</li>
-        <li><strong>Upload</strong> — All outputs are uploaded to an S3 bucket. A CloudFront cache invalidation ensures the website reflects the new data immediately.</li>
+        <li><strong>Score</strong> — CVSS scores are extracted from three sources in priority order: <code>database_specific.cvss_score</code>, the CVSS vector string (parsed using the <em>cvss</em> library), or the severity label as a fallback.</li>
+        <li><strong>Aggregate</strong> — Records are grouped by package identity. For Maven this is <code>groupId:artifactId</code>; for PyPI and npm it is the flat package name.</li>
+        <li><strong>Generate</strong> — Two CSVs and a metadata JSON are written to <code>/tmp/{ecosystem}/</code>.</li>
+        <li><strong>Upload</strong> — All outputs are uploaded to S3 under an ecosystem-specific prefix (<code>maven/</code>, <code>pypi/</code>, <code>npm/</code>). A single CloudFront cache invalidation is issued after all ecosystems complete.</li>
     </ol>
     <p>
         The pipeline runs as an <strong>AWS Lambda function</strong> (container image, 3 GB RAM, 15-minute timeout)
@@ -193,8 +210,8 @@
     <ul>
         <li><strong>OSV completeness</strong> — OSV does not capture every vulnerability. Some disclosures appear only in NVD or vendor advisories before being ingested into OSV. The pipeline reflects OSV's current state at the time of the weekly run.</li>
         <li><strong>CVSS accuracy</strong> — CVSS scores are taken from OSV records which may use NVD scores, maintainer-supplied scores, or be inferred from severity labels. Scores can change as NVD re-analyses CVEs.</li>
-        <li><strong>Transitive dependencies</strong> — Components like <em>commons-codec</em> or <em>slf4j-api</em> may appear with high CVE counts despite being low-risk in practice, because they are almost always pulled in as transitive dependencies rather than chosen directly.</li>
-        <li><strong>Maven only</strong> — Only the Maven ecosystem is currently covered. Node.js (npm), Python (PyPI), and other ecosystems are not included.</li>
+        <li><strong>Transitive dependencies</strong> — Widely-used utility packages (e.g. <em>commons-codec</em> in Maven, <em>urllib3</em> in PyPI, <em>debug</em> in npm) may appear with high CVE counts despite being low-risk in practice, because they are almost always pulled in as transitive dependencies rather than chosen directly.</li>
+        <li><strong>Ecosystem scope</strong> — Only Maven, PyPI, and npm are currently covered. Other ecosystems supported by OSV (Go, Rust, RubyGems, etc.) are not included but use the same data source and could be added.</li>
         <li><strong>Fixed version lag</strong> — Fixed version data may lag behind actual patch releases by days or weeks depending on how quickly maintainers update OSV records.</li>
     </ul>
 
@@ -202,11 +219,11 @@
     <table>
         <thead><tr><th>Component</th><th>Technology</th><th>Purpose</th></tr></thead>
         <tbody>
-            <tr><td><strong>Pipeline</strong></td><td>Python 3.12 · pandas · boto3</td><td>Download, parse, score, generate outputs</td></tr>
+            <tr><td><strong>Pipeline</strong></td><td>Python 3.12 · pandas · boto3</td><td>Download, parse, score, and generate outputs for each ecosystem</td></tr>
             <tr><td><strong>Compute</strong></td><td>AWS Lambda (container, 3 GB)</td><td>Runs the pipeline on demand and on schedule</td></tr>
             <tr><td><strong>Container Registry</strong></td><td>Amazon ECR</td><td>Stores the pipeline Docker image</td></tr>
             <tr><td><strong>Schedule</strong></td><td>Amazon EventBridge Scheduler</td><td>Triggers Lambda every Monday 06:00 UTC</td></tr>
-            <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, metadata, and this website</td></tr>
+            <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, metadata, and this website (under <code>maven/</code>, <code>pypi/</code>, <code>npm/</code> prefixes)</td></tr>
             <tr><td><strong>CDN</strong></td><td>Amazon CloudFront</td><td>HTTPS delivery and edge caching</td></tr>
             <tr><td><strong>CI/CD</strong></td><td>GitHub Actions</td><td>Builds and deploys Lambda image on code push; deploys HTML on content change</td></tr>
         </tbody>

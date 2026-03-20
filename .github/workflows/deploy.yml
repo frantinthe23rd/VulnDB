@@ -5,6 +5,9 @@ on:
     branches: [main, master]
     paths:
       - 'index.html'
+      - 'maven.html'
+      - 'pypi.html'
+      - 'npm.html'
       - 'about.html'
       - 'images/background.png'
 
@@ -24,7 +27,7 @@ jobs:
 
       - name: Upload HTML files to S3
         run: |
-          for f in index.html about.html; do
+          for f in index.html maven.html pypi.html npm.html about.html; do
             [ -f "$f" ] && aws s3 cp $f s3://${{ vars.S3_BUCKET }}/$f \
               --content-type text/html \
               --cache-control "max-age=300"

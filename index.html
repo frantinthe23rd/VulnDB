@@ -4,10 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <title>Maven Vulnerability Dashboard</title>
-    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
-    <link rel="stylesheet" href="https://cdn.datatables.net/responsive/2.5.0/css/responsive.dataTables.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <title>VulnDB — Open Source Vulnerability Intelligence</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,7 +13,6 @@
             --surface: #1e293b;
             --border:  #334155;
             --accent:  #38bdf8;
-            --accent2: #f59e0b;
             --text:    #e2e8f0;
             --muted:   #94a3b8;
             --crit:    #ef4444;
@@ -27,501 +23,88 @@
 
         body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
 
-        /* ── Header ── */
         header {
             background: var(--surface); border-bottom: 1px solid var(--border);
             padding: 0 2vw; display: flex; align-items: center; justify-content: space-between;
             height: 60px; position: sticky; top: 0; z-index: 100;
         }
-        header h1 { font-size: 1.25rem; color: var(--accent); letter-spacing: .5px; white-space: nowrap; }
-        .nav { display: flex; gap: 20px; list-style: none; flex-wrap: wrap; }
+        header h1 { font-size: 1.25rem; color: var(--accent); letter-spacing: .5px; }
+        .nav { display: flex; gap: 20px; list-style: none; }
         .nav a { color: var(--muted); text-decoration: none; font-size: .9rem; transition: color .2s; }
         .nav a:hover { color: var(--text); }
-        #last-updated { font-size: .8rem; color: var(--muted); white-space: nowrap; margin-left: 16px; }
 
-        /* ── Main layout — fills the screen ── */
-        main { width: 96vw; max-width: 2400px; margin: 0 auto; padding: 28px 0; }
+        main { width: 96vw; max-width: 900px; margin: 0 auto; padding: 60px 0; }
 
-        /* ── Metric cards ── */
-        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 28px; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; }
-        .card .label { font-size: .73rem; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
-        .card .value { font-size: 1.9rem; font-weight: 700; }
-        .card.total .value { color: var(--accent); }
-        .card.crit  .value { color: var(--crit); }
-        .card.high  .value { color: var(--high); }
-        .card.med   .value { color: var(--med); }
-        .card.low   .value { color: var(--low); }
-        .card[data-filter] { cursor: pointer; transition: border-color .2s, transform .15s; }
-        .card[data-filter]:hover { border-color: var(--accent); transform: translateY(-2px); }
-        .card[data-filter].active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
-        .card .hint { font-size: .68rem; color: var(--border); margin-top: 2px; }
+        .hero { text-align: center; margin-bottom: 56px; }
+        .hero h2 { font-size: 2rem; color: var(--text); margin-bottom: 12px; }
+        .hero p  { color: var(--muted); font-size: 1.05rem; line-height: 1.7; max-width: 560px; margin: 0 auto; }
 
-        /* ── Sections ── */
-        section { margin-bottom: 32px; }
+        .ecosystems { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; }
 
-        /* ── details/summary toggle ── */
-        details > summary {
-            cursor: pointer;
-            list-style: none;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 1.05rem;
-            font-weight: 600;
-            color: var(--accent2);
-            padding-bottom: 8px;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 16px;
-            user-select: none;
+        .eco-card {
+            display: block; text-decoration: none;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+            padding: 32px 28px; transition: border-color .2s, transform .15s, box-shadow .2s;
         }
-        details > summary::-webkit-details-marker { display: none; }
-        details > summary::before {
-            content: '▶';
-            font-size: .65rem;
-            color: var(--muted);
-            transition: transform .2s;
-            flex-shrink: 0;
+        .eco-card:hover { border-color: var(--accent); transform: translateY(-3px); box-shadow: 0 8px 24px rgba(56,189,248,.12); }
+        .eco-card .icon { font-size: 2.2rem; margin-bottom: 14px; display: block; }
+        .eco-card h2 { font-size: 1.2rem; color: var(--accent); margin-bottom: 8px; }
+        .eco-card p  { font-size: .875rem; color: var(--muted); line-height: 1.6; }
+        .eco-card .tag {
+            display: inline-block; margin-top: 16px; font-size: .72rem; font-weight: 600;
+            padding: 3px 9px; border-radius: 4px; background: #0c2a3d; color: var(--accent);
+            text-transform: uppercase; letter-spacing: .6px;
         }
-        details[open] > summary::before { transform: rotate(90deg); }
 
-        /* ── Methodology box ── */
-        .methodology { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: 12px; padding: 20px 24px; margin-top: 0; }
-        .methodology-body { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; }
-        @media (max-width: 768px) { .methodology-body { grid-template-columns: 1fr; } }
-        .method-block h4 { color: var(--accent); font-size: .83rem; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
-        .method-block p, .method-block li { font-size: .875rem; color: var(--muted); line-height: 1.65; }
-        .method-block ul { padding-left: 16px; }
-        .method-block li { margin-bottom: 4px; }
-        .method-block strong { color: var(--text); }
-
-        /* ── Chart ── */
-        .chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
-
-        /* ── Heatmap ── */
-        .heatmap-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; text-align: center; }
-        .heatmap-wrap img { max-width: 100%; height: auto; border-radius: 8px; }
-        .heatmap-wrap a { display: inline-block; margin-top: 12px; color: var(--accent); font-size: .85rem; text-decoration: none; }
-        .heatmap-wrap a:hover { text-decoration: underline; }
-
-        /* ── DataTables ── */
-        .dt-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; overflow-x: auto; }
-        table.dataTable { width: 100% !important; border-collapse: collapse; color: var(--text); font-size: .85rem; }
-        table.dataTable thead th { background: #0f172a; color: var(--accent); border-bottom: 2px solid var(--border); padding: 9px 11px; white-space: nowrap; }
-        table.dataTable tbody td { padding: 7px 11px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-        table.dataTable tbody tr:hover td { background: #263045; }
-        .dataTables_wrapper .dataTables_filter input,
-        .dataTables_wrapper .dataTables_length select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
-        .dataTables_wrapper .dataTables_filter label,
-        .dataTables_wrapper .dataTables_length label,
-        .dataTables_wrapper .dataTables_info { color: var(--muted); font-size: .8rem; }
-        .dataTables_wrapper .dataTables_paginate .paginate_button { color: var(--muted) !important; border-radius: 6px; }
-        .dataTables_wrapper .dataTables_paginate .paginate_button.current { background: var(--accent) !important; color: #0f172a !important; border: none !important; }
-        .dataTables_wrapper .dataTables_paginate .paginate_button:hover { background: var(--border) !important; color: var(--text) !important; }
-        /* Responsive child rows */
-        table.dataTable.dtr-inline.collapsed > tbody > tr > td.dtr-control::before { background-color: var(--accent); }
-        tr.child td.child { background: #0f172a; }
-
-        /* severity badges */
-        .sev { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
-        .sev-CRITICAL { background: #450a0a; color: var(--crit); }
-        .sev-HIGH     { background: #431407; color: var(--high); }
-        .sev-MEDIUM   { background: #422006; color: var(--med); }
-        .sev-LOW      { background: #052e16; color: var(--low); }
-        .sev-UNKNOWN  { background: #1e293b; color: var(--muted); }
-
-        /* risk score */
-        .risk { display: inline-block; padding: 2px 10px; border-radius: 4px; font-weight: 700; font-size: .85rem; }
-        .risk-high   { background: #450a0a; color: var(--crit); }
-        .risk-medium { background: #431407; color: var(--high); }
-        .risk-low    { background: #422006; color: var(--med); }
-        .risk-none   { background: #1e293b; color: var(--muted); }
-
-        /* trend */
-        .trend-up   { color: var(--crit); font-weight: 700; }
-        .trend-down { color: var(--low);  font-weight: 700; }
-        .trend-flat { color: var(--muted); }
-
-        /* fix */
-        .fix-available { color: var(--low); font-size: .8rem; font-weight: 600; }
-        .fix-none      { color: var(--crit); font-size: .8rem; font-weight: 600; }
-
-        /* date */
-        .date-hot  { color: var(--crit); font-weight: 600; }
-        .date-warm { color: var(--high); }
-        .date-old  { color: var(--muted); }
-
-        /* misc */
-        .dl-link { text-align: right; margin-bottom: 10px; }
-        .dl-link a { color: var(--accent); font-size: .85rem; text-decoration: none; }
-        .dl-link a:hover { text-decoration: underline; }
-        .product-link { color: var(--accent); cursor: pointer; border-bottom: 1px dashed var(--accent); }
-        .product-link:hover { color: #fff; border-bottom-color: #fff; }
-
-        /* filter banner */
-        #filter-banner {
-            display: none; background: #1e3a5f; border: 1px solid var(--accent);
-            border-radius: 8px; padding: 10px 16px; margin-bottom: 12px;
-            font-size: .875rem; align-items: center; justify-content: space-between;
-        }
-        #filter-banner span { color: var(--accent); }
-        #filter-clear { background: none; border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: .8rem; }
-        #filter-clear:hover { background: var(--accent); color: #0f172a; }
-        .loading { color: var(--muted); font-size: .9rem; padding: 20px; text-align: center; }
+        footer { text-align: center; padding: 48px 0 24px; color: var(--muted); font-size: .8rem; }
+        footer a { color: var(--muted); }
+        footer a:hover { color: var(--text); }
     </style>
 </head>
 <body>
 
 <header>
-    <h1>Maven Vulnerability Dashboard</h1>
+    <h1>VulnDB</h1>
     <nav>
         <ul class="nav">
-            <li><a href="#metrics">Overview</a></li>
-            <li><a href="#methodology">Methodology</a></li>
-            <li><a href="#top10">Top 10</a></li>
-
-            <li><a href="#summary">Summary</a></li>
-            <li><a href="#detailed">Detailed</a></li>
             <li><a href="about.html">About</a></li>
         </ul>
     </nav>
-    <span id="last-updated">Loading…</span>
 </header>
 
 <main>
+    <div class="hero">
+        <h2>Open Source Vulnerability Intelligence</h2>
+        <p>Track CVE activity, risk scores, and safe versions across major open source ecosystems — powered by Google OSV, updated weekly.</p>
+    </div>
 
-    <!-- Metric cards -->
-    <section id="metrics">
-        <div class="cards">
-            <div class="card total"><span class="label">Total CVEs</span><span class="value" id="m-total">—</span></div>
-            <div class="card crit" data-filter="CRITICAL"><span class="label">Critical</span><span class="value" id="m-crit">—</span><span class="hint">click to filter ↓</span></div>
-            <div class="card high" data-filter="HIGH">    <span class="label">High</span>    <span class="value" id="m-high">—</span><span class="hint">click to filter ↓</span></div>
-            <div class="card med"  data-filter="MEDIUM">  <span class="label">Medium</span>  <span class="value" id="m-med">—</span> <span class="hint">click to filter ↓</span></div>
-            <div class="card low"  data-filter="LOW">     <span class="label">Low</span>     <span class="value" id="m-low">—</span> <span class="hint">click to filter ↓</span></div>
-            <div class="card total"><span class="label">Packages</span><span class="value" id="m-pkgs">—</span></div>
-        </div>
-    </section>
+    <div class="ecosystems">
+        <a href="maven.html" class="eco-card">
+            <span class="icon">☕</span>
+            <h2>Maven</h2>
+            <p>Java/JVM vulnerabilities across Maven Central packages. Includes group and artifact tracking with semantic version analysis.</p>
+            <span class="tag">Java / JVM</span>
+        </a>
 
-    <!-- Methodology -->
-    <section id="methodology">
-        <details open>
-            <summary>How is Risk Score calculated?</summary>
-            <div class="methodology">
-                <div class="methodology-body">
-                    <div class="method-block">
-                        <h4>Risk Score</h4>
-                        <p>Focuses on <strong>recent activity (last 24 months)</strong> weighted by severity:</p>
-                        <ul>
-                            <li><strong>Critical CVE</strong> = 4 points</li>
-                            <li><strong>High CVE</strong> = 2 points</li>
-                            <li><strong>Medium CVE</strong> = 1 point</li>
-                            <li><strong>Low CVE</strong> = 0 points</li>
-                        </ul>
-                        <p style="margin-top:8px">A component with 300 old CVEs that have all been patched scores <strong>0</strong>. One actively receiving critical CVEs scores high. Use this — not total CVE count — to guide adoption decisions.</p>
-                    </div>
-                    <div class="method-block">
-                        <h4>Trend</h4>
-                        <p>Compares CVE activity in the <strong>last 12 months</strong> vs the <strong>prior 12 months</strong>:</p>
-                        <ul>
-                            <li><span class="trend-up">↑ Increasing</span> — more CVEs recently, worsening</li>
-                            <li><span class="trend-down">↓ Decreasing</span> — fewer CVEs recently, improving</li>
-                            <li><span class="trend-flat">→ Stable</span> — no change</li>
-                        </ul>
-                        <h4 style="margin-top:16px">Min Safe Version</h4>
-                        <p>The <strong>highest fixed version</strong> referenced across all CVEs for that package. Upgrading to this version or above addresses the most known vulnerabilities. <span class="fix-none">⚠ No fix</span> means OSV records no fixed version for one or more CVEs.</p>
-                    </div>
-                </div>
-            </div>
-        </details>
-    </section>
+        <a href="pypi.html" class="eco-card">
+            <span class="icon">🐍</span>
+            <h2>PyPI</h2>
+            <p>Python package vulnerabilities from the PyPI ecosystem. Covers popular libraries and frameworks used in data, web, and automation.</p>
+            <span class="tag">Python</span>
+        </a>
 
-    <!-- Top 10 bar chart -->
-    <section id="top10">
-        <details open>
-            <summary>Top 10 by Risk Score — click a bar to filter vulnerabilities</summary>
-            <div class="chart-wrap">
-                <canvas id="top10Chart" height="70"></canvas>
-            </div>
-        </details>
-    </section>
-
-    <!-- Summary table -->
-    <section id="summary">
-        <details open>
-            <summary>Summary by Package</summary>
-            <div class="dl-link"><a href="csv/vulnerability_summary.csv" download>Download CSV</a></div>
-            <div class="dt-wrap">
-                <div class="loading" id="summary-loading">Loading data…</div>
-                <table id="summaryTable" class="display nowrap" style="display:none;width:100%">
-                    <thead><tr>
-                        <th>Publisher</th>
-                        <th>Product</th>
-                        <th>Risk Score</th>
-                        <th>Trend</th>
-                        <th>Min Safe Version</th>
-                        <th>Unfixed CVEs</th>
-                        <th>Latest CVE</th>
-                        <th>Recent CVEs (24m)</th>
-                        <th>Total CVEs</th>
-                        <th>Critical</th>
-                        <th>High</th>
-                        <th>Medium</th>
-                        <th>Low</th>
-                        <th>Avg CVSS</th>
-                        <th>Affected Versions</th>
-                    </tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </details>
-    </section>
-
-    <!-- Detailed table -->
-    <section id="detailed">
-        <details open>
-            <summary>Detailed Vulnerabilities</summary>
-            <div class="dl-link"><a href="csv/vulnerability_detailed.csv" download>Download CSV</a></div>
-            <div id="filter-banner">
-                <span>Filtered: <strong id="filter-label"></strong></span>
-                <button id="filter-clear">Clear filter</button>
-            </div>
-            <div class="dt-wrap">
-                <div class="loading" id="detailed-loading">Loading data…</div>
-                <table id="detailedTable" class="display nowrap" style="display:none;width:100%">
-                    <thead><tr>
-                        <th>CVE</th>
-                        <th>Publisher</th>
-                        <th>Product</th>
-                        <th>CVSS</th>
-                        <th>Severity</th>
-                        <th>Published</th>
-                        <th>Fixed In</th>
-                        <th>Affected Versions</th>
-                        <th>Summary</th>
-                    </tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </details>
-    </section>
-
+        <a href="npm.html" class="eco-card">
+            <span class="icon">📦</span>
+            <h2>npm</h2>
+            <p>JavaScript and Node.js package vulnerabilities from the npm registry. Includes front-end, back-end, and tooling packages.</p>
+            <span class="tag">JavaScript / Node</span>
+        </a>
+    </div>
 </main>
 
-<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
-<script src="https://cdn.datatables.net/responsive/2.5.0/js/dataTables.responsive.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-<script>
-(function () {
+<footer>
+    Data sourced from <a href="https://osv.dev" target="_blank" rel="noopener">Google OSV</a> &mdash; no API key required &mdash; <a href="about.html">methodology</a>
+</footer>
 
-    const ONE_YEAR_AGO  = new Date(); ONE_YEAR_AGO.setFullYear(ONE_YEAR_AGO.getFullYear() - 1);
-    const TWO_YEARS_AGO = new Date(); TWO_YEARS_AGO.setFullYear(TWO_YEARS_AGO.getFullYear() - 2);
-
-    function dateClass(d) {
-        if (!d) return 'date-old';
-        const dt = new Date(d);
-        if (dt >= ONE_YEAR_AGO)  return 'date-hot';
-        if (dt >= TWO_YEARS_AGO) return 'date-warm';
-        return 'date-old';
-    }
-
-    function riskClass(s) {
-        s = parseInt(s) || 0;
-        if (s >= 20) return 'risk-high';
-        if (s >= 5)  return 'risk-medium';
-        if (s >  0)  return 'risk-low';
-        return 'risk-none';
-    }
-
-    // ── Metadata ──────────────────────────────────────────────────────────────
-    fetch('metadata.json?ts=' + Date.now())
-        .then(r => r.json())
-        .then(m => {
-            document.getElementById('last-updated').textContent = 'Updated ' + m.last_updated;
-            document.getElementById('m-total').textContent = m.total_vulnerabilities.toLocaleString();
-            document.getElementById('m-crit').textContent  = m.critical_count.toLocaleString();
-            document.getElementById('m-high').textContent  = m.high_count.toLocaleString();
-            document.getElementById('m-med').textContent   = m.medium_count.toLocaleString();
-            document.getElementById('m-low').textContent   = m.low_count.toLocaleString();
-            document.getElementById('m-pkgs').textContent  = m.total_packages.toLocaleString();
-        })
-        .catch(() => { document.getElementById('last-updated').textContent = ''; });
-
-    // ── Summary CSV ───────────────────────────────────────────────────────────
-    Papa.parse('csv/vulnerability_summary.csv?ts=' + Date.now(), {
-        download: true, header: true, skipEmptyLines: true,
-        complete: function (results) {
-            const data = results.data;
-
-            // Top-10 horizontal bar chart
-            const top10 = data.slice(0, 10); // already sorted highest risk first
-            const top10Labels = top10.map((r, i) => `${i + 1}. ${r.product}`);
-            new Chart(document.getElementById('top10Chart'), {
-                type: 'bar',
-                data: {
-                    labels: top10Labels,
-                    datasets: [
-                        { label: 'Critical', data: top10.map(r => parseInt(r.critical)||0), backgroundColor: '#ef4444' },
-                        { label: 'High',     data: top10.map(r => parseInt(r.high)||0),     backgroundColor: '#f97316' },
-                        { label: 'Medium',   data: top10.map(r => parseInt(r.medium)||0),   backgroundColor: '#eab308' },
-                        { label: 'Low',      data: top10.map(r => parseInt(r.low)||0),      backgroundColor: '#22c55e' },
-                    ]
-                },
-                options: {
-                    indexAxis: 'y',
-                    responsive: true,
-                    plugins: {
-                        legend: { labels: { color: '#e2e8f0' } },
-                        tooltip: {
-                            callbacks: {
-                                afterTitle: items => {
-                                    const d = top10[items[0].dataIndex];
-                                    return `Risk Score: ${d.risk_score}  |  Trend: ${d.trend}`;
-                                }
-                            }
-                        }
-                    },
-                    scales: {
-                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' }, title: { display: true, text: 'CVE Count (recent 24 months)', color: '#94a3b8' } },
-                        y: { stacked: true, ticks: { color: '#e2e8f0', font: { size: 13 } }, grid: { color: '#334155' } }
-                    },
-                    onClick: (evt, elements) => {
-                        if (elements.length > 0) filterDetailedByProduct(top10[elements[0].index].product);
-                    },
-                    onHover: (evt, elements) => {
-                        evt.native.target.style.cursor = elements.length ? 'pointer' : 'default';
-                    }
-                }
-            });
-
-            // Summary DataTable
-            document.getElementById('summary-loading').style.display = 'none';
-            document.getElementById('summaryTable').style.display = '';
-            $('#summaryTable').DataTable({
-                data: data,
-                order: [[2, 'desc']],
-                pageLength: 25,
-                responsive: true,
-                autoWidth: false,
-                columns: [
-                    { data: 'publisher',    defaultContent: '', responsivePriority: 5 },
-                    { data: 'product',      defaultContent: '', responsivePriority: 1,
-                      render: v => `<span class="product-link" data-product="${v}">${v}</span>` },
-                    { data: 'risk_score',   defaultContent: '0', responsivePriority: 1,
-                      render: v => `<span class="risk ${riskClass(v)}">${v}</span>` },
-                    { data: 'trend',        defaultContent: '', responsivePriority: 3,
-                      render: v => v === 'up'   ? '<span class="trend-up">↑ Increasing</span>' :
-                                   v === 'down' ? '<span class="trend-down">↓ Decreasing</span>' :
-                                                  '<span class="trend-flat">→ Stable</span>' },
-                    { data: 'min_safe_version', defaultContent: '', responsivePriority: 2,
-                      render: v => v ? `<span class="fix-available">✓ ${v}</span>` : '' },
-                    { data: 'unfixed_cves', defaultContent: '0', responsivePriority: 2,
-                      render: v => parseInt(v) > 0 ? `<span class="fix-none">⚠ ${v}</span>` : `<span style="color:var(--low)">0</span>` },
-                    { data: 'latest_vuln_date', defaultContent: '', responsivePriority: 2,
-                      render: v => `<span class="${dateClass(v)}">${v}</span>` },
-                    { data: 'recent_cves',  defaultContent: '0', responsivePriority: 4 },
-                    { data: 'total_vulnerabilities', defaultContent: '0', responsivePriority: 4,
-                      render: v => parseInt(v).toLocaleString() },
-                    { data: 'critical', defaultContent: '0', responsivePriority: 6,
-                      render: v => v > 0 ? `<span class="sev sev-CRITICAL">${v}</span>` : v },
-                    { data: 'high',     defaultContent: '0', responsivePriority: 6,
-                      render: v => v > 0 ? `<span class="sev sev-HIGH">${v}</span>` : v },
-                    { data: 'medium',   defaultContent: '0', responsivePriority: 7,
-                      render: v => v > 0 ? `<span class="sev sev-MEDIUM">${v}</span>` : v },
-                    { data: 'low',      defaultContent: '0', responsivePriority: 7,
-                      render: v => v > 0 ? `<span class="sev sev-LOW">${v}</span>` : v },
-                    { data: 'avg_cvss', defaultContent: '', responsivePriority: 7 },
-                    { data: 'total_affected_versions', defaultContent: '0', responsivePriority: 8,
-                      render: v => parseInt(v).toLocaleString() },
-                ]
-            });
-
-            $('#summaryTable tbody').on('click', '.product-link', function () {
-                filterDetailedByProduct($(this).data('product'));
-            });
-        }
-    });
-
-    // ── Detailed CSV ──────────────────────────────────────────────────────────
-    let detailedTable = null;
-
-    Papa.parse('csv/vulnerability_detailed.csv?ts=' + Date.now(), {
-        download: true, header: true, skipEmptyLines: true,
-        complete: function (results) {
-            document.getElementById('detailed-loading').style.display = 'none';
-            document.getElementById('detailedTable').style.display = '';
-            detailedTable = $('#detailedTable').DataTable({
-                data: results.data,
-                order: [[3, 'desc']],
-                pageLength: 25,
-                responsive: true,
-                autoWidth: false,
-                columns: [
-                    { data: 'cve', defaultContent: '', responsivePriority: 1,
-                      render: v => {
-                        if (!v) return '';
-                        const url = v.startsWith('CVE-')
-                          ? `https://nvd.nist.gov/vuln/detail/${v}`
-                          : `https://osv.dev/vulnerability/${v}`;
-                        return `<a href="${url}" target="_blank" rel="noopener" style="color:var(--accent)">${v}</a>`;
-                      }},
-                    { data: 'publisher',    defaultContent: '', responsivePriority: 5 },
-                    { data: 'product',      defaultContent: '', responsivePriority: 2 },
-                    { data: 'cvss_score',   defaultContent: '0', responsivePriority: 2 },
-                    { data: 'severity',     defaultContent: 'UNKNOWN', responsivePriority: 2,
-                      render: v => `<span class="sev sev-${v}">${v}</span>` },
-                    { data: 'published_date', defaultContent: '', responsivePriority: 3,
-                      render: v => `<span class="${dateClass(v)}">${v}</span>` },
-                    { data: 'fixed_version', defaultContent: '', responsivePriority: 3,
-                      render: v => v ? `<span class="fix-available">✓ ${v}</span>` : `<span class="fix-none">⚠ No fix</span>` },
-                    { data: 'num_affected_versions', defaultContent: '0', responsivePriority: 6 },
-                    { data: 'summary', defaultContent: '', responsivePriority: 4,
-                      render: v => `<span title="${v?.replace(/"/g,'&quot;')}">${v?.slice(0,80)}${v?.length>80?'…':''}</span>` },
-                ]
-            });
-        }
-    });
-
-    // ── Filters ───────────────────────────────────────────────────────────────
-    function showBanner(label) {
-        document.getElementById('filter-label').textContent = label;
-        document.getElementById('filter-banner').style.display = 'flex';
-        document.getElementById('detailed').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    function clearAllFilters() {
-        if (!detailedTable) return;
-        detailedTable.column(2).search('');
-        detailedTable.column(4).search('');
-        detailedTable.draw();
-        document.getElementById('filter-banner').style.display = 'none';
-        document.querySelectorAll('.card[data-filter]').forEach(c => c.classList.remove('active'));
-    }
-
-    function filterDetailedByProduct(product) {
-        if (!detailedTable) return;
-        clearAllFilters();
-        detailedTable.column(2).search('^' + $.fn.dataTable.util.escapeRegex(product) + '$', true, false).draw();
-        showBanner('Product: ' + product);
-    }
-
-    function filterDetailedBySeverity(severity) {
-        if (!detailedTable) return;
-        clearAllFilters();
-        detailedTable.column(4).search('^' + severity + '$', true, false).draw();
-        document.querySelector(`.card[data-filter="${severity}"]`)?.classList.add('active');
-        showBanner('Severity: ' + severity);
-    }
-
-    document.getElementById('filter-clear').addEventListener('click', clearAllFilters);
-
-    document.querySelectorAll('.card[data-filter]').forEach(card => {
-        card.addEventListener('click', function () {
-            this.classList.contains('active') ? clearAllFilters() : filterDetailedBySeverity(this.dataset.filter);
-        });
-    });
-
-})();
-</script>
 </body>
 </html>

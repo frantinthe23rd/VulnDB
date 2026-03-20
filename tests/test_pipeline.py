@@ -102,6 +102,16 @@ class TestDownloadOsv:
         assert isinstance(result, io.BytesIO)
         assert result.read() == b"PK\x03\x04fake-zip-data"
 
+    def test_success_pypi(self, requests_mock):
+        requests_mock.get(pipeline.OSV_URLS["PyPI"], content=b"PK\x03\x04fake-zip-data")
+        result = pipeline.download_osv("PyPI")
+        assert isinstance(result, io.BytesIO)
+
+    def test_success_npm(self, requests_mock):
+        requests_mock.get(pipeline.OSV_URLS["npm"], content=b"PK\x03\x04fake-zip-data")
+        result = pipeline.download_osv("npm")
+        assert isinstance(result, io.BytesIO)
+
     def test_http_error_raises_runtime_error(self, requests_mock):
         requests_mock.get(pipeline.OSV_URL, status_code=503)
         with pytest.raises(RuntimeError, match="HTTP 503"):
@@ -144,6 +154,24 @@ def _maven_record(osv_id="GHSA-0001", cve="CVE-2024-1234", score=7.5,
         "affected": [{
             "package": {"ecosystem": "Maven", "name": f"{group}:{artifact}"},
             "versions": versions or ["1.0.0", "1.1.0"],
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": fixed}]}],
+        }],
+        "severity": [],
+    }
+
+
+def _flat_record(ecosystem: str, osv_id="GHSA-0001", cve="CVE-2024-5678",
+                 score=8.0, package="requests", versions=None, fixed="2.29.0") -> dict:
+    """Build a flat-namespace OSV record (PyPI, npm, etc.)."""
+    return {
+        "id": osv_id,
+        "aliases": [cve],
+        "published": "2024-03-01T00:00:00Z",
+        "summary": "A test vulnerability in a flat-namespace package",
+        "database_specific": {"cvss_score": score},
+        "affected": [{
+            "package": {"ecosystem": ecosystem, "name": package},
+            "versions": versions or ["2.27.0", "2.28.0"],
             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": fixed}]}],
         }],
         "severity": [],
@@ -224,6 +252,38 @@ class TestParseOsv:
         assert df.iloc[0]["num_affected_versions"] == 2  # 1.0.0 + 2.0.0
 
 
+class TestParseOsvFlatNamespace:
+    """Tests for PyPI and npm (flat-namespace) ecosystem parsing."""
+
+    @pytest.mark.parametrize("ecosystem", ["PyPI", "npm"])
+    def test_valid_record_parsed(self, ecosystem):
+        buf = _make_zip([_flat_record(ecosystem)])
+        df = pipeline.parse_osv(buf, ecosystem)
+        assert len(df) == 1
+        assert df.iloc[0]["group_id"] == ""
+        assert df.iloc[0]["artifact_id"] == "requests"
+        assert df.iloc[0]["cve"] == "CVE-2024-5678"
+        assert df.iloc[0]["fixed_version"] == "2.29.0"
+
+    @pytest.mark.parametrize("ecosystem", ["PyPI", "npm"])
+    def test_wrong_ecosystem_skipped(self, ecosystem):
+        """Records for a different ecosystem are filtered out."""
+        other = "npm" if ecosystem == "PyPI" else "PyPI"
+        buf = _make_zip([_flat_record(other)])
+        with pytest.raises(RuntimeError, match=f"No {ecosystem} vulnerability records"):
+            pipeline.parse_osv(buf, ecosystem)
+
+    @pytest.mark.parametrize("ecosystem", ["PyPI", "npm"])
+    def test_multiple_packages(self, ecosystem):
+        records = [
+            _flat_record(ecosystem, "GHSA-0001", "CVE-2024-0001", package="requests"),
+            _flat_record(ecosystem, "GHSA-0002", "CVE-2024-0002", package="flask"),
+        ]
+        df = pipeline.parse_osv(_make_zip(records), ecosystem)
+        assert len(df) == 2
+        assert set(df["artifact_id"]) == {"requests", "flask"}
+
+
 # ── generate_outputs ──────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -243,86 +303,121 @@ def sample_df():
     }])
 
 
+@pytest.fixture
+def sample_pypi_df():
+    return pd.DataFrame([{
+        "osv_id": "GHSA-0002",
+        "cve": "CVE-2024-5678",
+        "group_id": "",
+        "artifact_id": "requests",
+        "summary": "Test PyPI vuln",
+        "cvss_score": 8.0,
+        "severity": "HIGH",
+        "published_date": "2025-06-01",
+        "versions": ["2.27.0", "2.28.0"],
+        "num_affected_versions": 2,
+        "fixed_version": "2.29.0",
+    }])
+
+
 class TestGenerateOutputs:
     def test_creates_csv_files(self, sample_df, tmp_path):
-        pipeline.generate_outputs(sample_df, out_dir=str(tmp_path))
-        assert (tmp_path / "csv" / "vulnerability_detailed.csv").exists()
-        assert (tmp_path / "csv" / "vulnerability_summary.csv").exists()
+        pipeline.generate_outputs(sample_df, "Maven", out_dir=str(tmp_path))
+        assert (tmp_path / "maven" / "csv" / "vulnerability_detailed.csv").exists()
+        assert (tmp_path / "maven" / "csv" / "vulnerability_summary.csv").exists()
 
     def test_creates_metadata_json(self, sample_df, tmp_path):
-        pipeline.generate_outputs(sample_df, out_dir=str(tmp_path))
-        meta = json.loads((tmp_path / "metadata.json").read_text())
+        pipeline.generate_outputs(sample_df, "Maven", out_dir=str(tmp_path))
+        meta = json.loads((tmp_path / "maven" / "metadata.json").read_text())
         assert meta["total_vulnerabilities"] == 1
         assert meta["total_packages"] == 1
         assert meta["high_count"] == 1
         assert meta["critical_count"] == 0
 
     def test_detailed_csv_columns(self, sample_df, tmp_path):
-        pipeline.generate_outputs(sample_df, out_dir=str(tmp_path))
-        detail = pd.read_csv(tmp_path / "csv" / "vulnerability_detailed.csv")
+        pipeline.generate_outputs(sample_df, "Maven", out_dir=str(tmp_path))
+        detail = pd.read_csv(tmp_path / "maven" / "csv" / "vulnerability_detailed.csv")
         assert "publisher" in detail.columns
         assert "product" in detail.columns
         assert "cve" in detail.columns
         assert "cvss_score" in detail.columns
 
     def test_summary_csv_has_risk_score(self, sample_df, tmp_path):
-        pipeline.generate_outputs(sample_df, out_dir=str(tmp_path))
-        summary = pd.read_csv(tmp_path / "csv" / "vulnerability_summary.csv")
+        pipeline.generate_outputs(sample_df, "Maven", out_dir=str(tmp_path))
+        summary = pd.read_csv(tmp_path / "maven" / "csv" / "vulnerability_summary.csv")
         assert "risk_score" in summary.columns
         assert "trend" in summary.columns
+
+    def test_pypi_outputs_written_to_pypi_subdir(self, sample_pypi_df, tmp_path):
+        pipeline.generate_outputs(sample_pypi_df, "PyPI", out_dir=str(tmp_path))
+        assert (tmp_path / "pypi" / "csv" / "vulnerability_detailed.csv").exists()
+        assert (tmp_path / "pypi" / "csv" / "vulnerability_summary.csv").exists()
+        assert (tmp_path / "pypi" / "metadata.json").exists()
+
+    def test_npm_outputs_written_to_npm_subdir(self, sample_pypi_df, tmp_path):
+        pipeline.generate_outputs(sample_pypi_df, "npm", out_dir=str(tmp_path))
+        assert (tmp_path / "npm" / "csv" / "vulnerability_detailed.csv").exists()
+        assert (tmp_path / "npm" / "metadata.json").exists()
 
     def test_os_error_on_write_raises_runtime_error(self, sample_df, tmp_path):
         with patch("pandas.DataFrame.to_csv", side_effect=OSError("disk full")):
             with pytest.raises(RuntimeError, match="Failed to write"):
-                pipeline.generate_outputs(sample_df, out_dir=str(tmp_path))
+                pipeline.generate_outputs(sample_df, "Maven", out_dir=str(tmp_path))
 
 
 # ── upload_to_s3 ──────────────────────────────────────────────────────────────
 
 class TestUploadToS3:
-    def test_uploads_all_three_files(self, tmp_path):
-        # Create dummy output files
-        csv_dir = tmp_path / "csv"
-        csv_dir.mkdir()
+    def _create_outputs(self, tmp_path, ecosystem):
+        eco_lower = ecosystem.lower()
+        csv_dir = tmp_path / eco_lower / "csv"
+        csv_dir.mkdir(parents=True)
         (csv_dir / "vulnerability_summary.csv").write_text("a,b\n1,2")
         (csv_dir / "vulnerability_detailed.csv").write_text("a,b\n1,2")
-        (tmp_path / "metadata.json").write_text("{}")
+        (tmp_path / eco_lower / "metadata.json").write_text("{}")
 
+    def test_uploads_all_three_files(self, tmp_path):
+        self._create_outputs(tmp_path, "Maven")
         mock_s3 = MagicMock()
         with patch("boto3.client", return_value=mock_s3):
-            pipeline.upload_to_s3(out_dir=str(tmp_path))
-
+            pipeline.upload_to_s3("Maven", out_dir=str(tmp_path))
         assert mock_s3.upload_file.call_count == 3
+
+    def test_s3_keys_include_ecosystem_prefix(self, tmp_path):
+        self._create_outputs(tmp_path, "PyPI")
+        mock_s3 = MagicMock()
+        with patch("boto3.client", return_value=mock_s3):
+            pipeline.upload_to_s3("PyPI", out_dir=str(tmp_path))
+        uploaded_keys = [call.args[2] for call in mock_s3.upload_file.call_args_list]
+        assert all(k.startswith("pypi/") for k in uploaded_keys)
+
+    def test_npm_s3_keys_include_npm_prefix(self, tmp_path):
+        self._create_outputs(tmp_path, "npm")
+        mock_s3 = MagicMock()
+        with patch("boto3.client", return_value=mock_s3):
+            pipeline.upload_to_s3("npm", out_dir=str(tmp_path))
+        uploaded_keys = [call.args[2] for call in mock_s3.upload_file.call_args_list]
+        assert all(k.startswith("npm/") for k in uploaded_keys)
 
     def test_no_credentials_raises_runtime_error(self, tmp_path):
         import botocore.exceptions
-        csv_dir = tmp_path / "csv"
-        csv_dir.mkdir()
-        (csv_dir / "vulnerability_summary.csv").write_text("a,b")
-        (csv_dir / "vulnerability_detailed.csv").write_text("a,b")
-        (tmp_path / "metadata.json").write_text("{}")
-
+        self._create_outputs(tmp_path, "Maven")
         mock_s3 = MagicMock()
         mock_s3.upload_file.side_effect = botocore.exceptions.NoCredentialsError()
         with patch("boto3.client", return_value=mock_s3):
             with pytest.raises(RuntimeError, match="No AWS credentials"):
-                pipeline.upload_to_s3(out_dir=str(tmp_path))
+                pipeline.upload_to_s3("Maven", out_dir=str(tmp_path))
 
     def test_client_error_raises_runtime_error(self, tmp_path):
         import botocore.exceptions
-        csv_dir = tmp_path / "csv"
-        csv_dir.mkdir()
-        (csv_dir / "vulnerability_summary.csv").write_text("a,b")
-        (csv_dir / "vulnerability_detailed.csv").write_text("a,b")
-        (tmp_path / "metadata.json").write_text("{}")
-
+        self._create_outputs(tmp_path, "Maven")
         mock_s3 = MagicMock()
         mock_s3.upload_file.side_effect = botocore.exceptions.ClientError(
             {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "PutObject"
         )
         with patch("boto3.client", return_value=mock_s3):
             with pytest.raises(RuntimeError, match="S3 upload failed"):
-                pipeline.upload_to_s3(out_dir=str(tmp_path))
+                pipeline.upload_to_s3("Maven", out_dir=str(tmp_path))
 
 
 # ── invalidate_cloudfront ─────────────────────────────────────────────────────

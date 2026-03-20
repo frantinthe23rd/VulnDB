@@ -2,9 +2,10 @@
 """
 VulnDB Pipeline
 ---------------
-Downloads the Maven vulnerability dataset from Google OSV (one bulk request,
-no API key required), processes it into summary/detailed CSVs and a heatmap,
-then uploads everything to S3 and invalidates CloudFront.
+Downloads Maven, PyPI, and npm vulnerability datasets from Google OSV (one
+bulk request per ecosystem, no API key required), processes them into
+summary/detailed CSVs, then uploads everything to S3 and invalidates
+CloudFront.
 
 Run locally:
     S3_BUCKET=vulndb-dashboard python pipeline.py
@@ -27,7 +28,13 @@ import pandas as pd
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OSV_URL    = "https://osv-vulnerabilities.storage.googleapis.com/Maven/all.zip"
+OSV_URLS = {
+    "Maven": "https://osv-vulnerabilities.storage.googleapis.com/Maven/all.zip",
+    "PyPI":  "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip",
+    "npm":   "https://osv-vulnerabilities.storage.googleapis.com/npm/all.zip",
+}
+# Backward-compat alias (used in tests)
+OSV_URL    = OSV_URLS["Maven"]
 S3_BUCKET  = os.environ["S3_BUCKET"]
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 CF_ID      = os.environ.get("CLOUDFRONT_DISTRIBUTION_ID", "")
@@ -87,13 +94,14 @@ def extract_cve(record: dict) -> str:
 
 # ── Stage 1: Download ─────────────────────────────────────────────────────────
 
-def download_osv() -> io.BytesIO:
-    log.info("Downloading OSV Maven bulk dataset …")
+def download_osv(ecosystem: str = "Maven") -> io.BytesIO:
+    url = OSV_URLS[ecosystem]
+    log.info(f"Downloading OSV {ecosystem} bulk dataset …")
     try:
-        resp = requests.get(OSV_URL, stream=True, timeout=600)
+        resp = requests.get(url, stream=True, timeout=600)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
-        raise RuntimeError(f"Timed out downloading OSV dataset from {OSV_URL}")
+        raise RuntimeError(f"Timed out downloading OSV dataset from {url}")
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(f"Network error downloading OSV dataset: {e}") from e
     except requests.exceptions.HTTPError as e:
@@ -105,7 +113,7 @@ def download_osv() -> io.BytesIO:
 
 # ── Stage 2: Parse ────────────────────────────────────────────────────────────
 
-def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
+def parse_osv(zip_buf: io.BytesIO, ecosystem: str = "Maven") -> pd.DataFrame:
     rows = []
     try:
         zf_ctx = zipfile.ZipFile(zip_buf)
@@ -122,20 +130,27 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                 log.debug(f"Skip {name}: {e}")
                 continue
 
-            cvss   = extract_cvss(rec)
-            sev    = score_to_severity(cvss)
-            cve    = extract_cve(rec)
-            pub    = rec.get("published", "")[:10]
+            cvss    = extract_cvss(rec)
+            sev     = score_to_severity(cvss)
+            cve     = extract_cve(rec)
+            pub     = rec.get("published", "")[:10]
             summary = rec.get("summary", "")[:300]
 
             for affected in rec.get("affected", []):
                 pkg = affected.get("package", {})
-                if pkg.get("ecosystem") != "Maven":
+                if pkg.get("ecosystem") != ecosystem:
                     continue
                 name_field = pkg.get("name", "")
-                if ":" not in name_field:
-                    continue
-                group_id, artifact_id = name_field.split(":", 1)
+
+                if ecosystem == "Maven":
+                    if ":" not in name_field:
+                        continue
+                    group_id, artifact_id = name_field.split(":", 1)
+                else:
+                    # PyPI, npm, and other flat-namespace ecosystems
+                    group_id    = ""
+                    artifact_id = name_field
+
                 versions = affected.get("versions", [])
 
                 # Extract fixed version from ranges
@@ -150,22 +165,22 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                         break
 
                 rows.append({
-                    "osv_id":            rec["id"],
-                    "cve":               cve,
-                    "group_id":          group_id,
-                    "artifact_id":       artifact_id,
-                    "summary":           summary,
-                    "cvss_score":        cvss,
-                    "severity":          sev,
-                    "published_date":    pub,
-                    "versions":          versions,
+                    "osv_id":                rec["id"],
+                    "cve":                   cve,
+                    "group_id":              group_id,
+                    "artifact_id":           artifact_id,
+                    "summary":               summary,
+                    "cvss_score":            cvss,
+                    "severity":              sev,
+                    "published_date":        pub,
+                    "versions":              versions,
                     "num_affected_versions": len(versions),
-                    "fixed_version":     fixed_ver,
+                    "fixed_version":         fixed_ver,
                 })
 
     df = pd.DataFrame(rows)
     if df.empty:
-        raise RuntimeError("No Maven vulnerability records found in OSV dataset")
+        raise RuntimeError(f"No {ecosystem} vulnerability records found in OSV dataset")
     log.info(f"Parsed {len(df):,} vulnerability-package rows (pre-dedup)")
 
     # A single OSV record can have multiple affected entries for the same package
@@ -205,11 +220,13 @@ def _max_version(versions: list) -> str:
 
 # ── Stage 3: Generate outputs ─────────────────────────────────────────────────
 
-def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
+def generate_outputs(df: pd.DataFrame, ecosystem: str = "Maven", out_dir: str = "/tmp") -> dict:
+    eco_lower = ecosystem.lower()
+    csv_dir   = f"{out_dir}/{eco_lower}/csv"
     try:
-        os.makedirs(f"{out_dir}/csv", exist_ok=True)
+        os.makedirs(csv_dir, exist_ok=True)
     except OSError as e:
-        raise RuntimeError(f"Cannot create output directory {out_dir}/csv: {e}") from e
+        raise RuntimeError(f"Cannot create output directory {csv_dir}: {e}") from e
 
     # ── Detailed CSV
     detailed = df[[
@@ -217,7 +234,7 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
         "published_date", "summary", "num_affected_versions", "fixed_version"
     ]].rename(columns={"group_id": "publisher", "artifact_id": "product"})
     try:
-        detailed.to_csv(f"{out_dir}/csv/vulnerability_detailed.csv", index=False)
+        detailed.to_csv(f"{csv_dir}/vulnerability_detailed.csv", index=False)
     except OSError as e:
         raise RuntimeError(f"Failed to write detailed CSV: {e}") from e
     log.info("Detailed CSV written")
@@ -256,8 +273,8 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
         .reset_index()
         .rename(columns={"group_id": "publisher", "artifact_id": "product"})
     )
-    summary["avg_cvss"]   = summary["avg_cvss"].round(1)
-    summary["risk_score"] = summary["risk_score"].astype(int)
+    summary["avg_cvss"]        = summary["avg_cvss"].round(1)
+    summary["risk_score"]      = summary["risk_score"].astype(int)
     summary["recent_cves"]     = summary["recent_cves"].astype(int)
     summary["last_year_cves"]  = summary["last_year_cves"].astype(int)
     summary["prev_year_cves"]  = summary["prev_year_cves"].astype(int)
@@ -274,23 +291,23 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
             "critical", "high", "medium", "low",
             "avg_cvss", "latest_vuln_date", "total_affected_versions",
             "min_safe_version", "unfixed_cves",
-        ]].to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
+        ]].to_csv(f"{csv_dir}/vulnerability_summary.csv", index=False)
     except OSError as e:
         raise RuntimeError(f"Failed to write summary CSV: {e}") from e
     log.info("Summary CSV written")
 
     # ── Metadata JSON
     metadata = {
-        "last_updated":         datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC"),
+        "last_updated":          datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC"),
         "total_vulnerabilities": int(df["osv_id"].nunique()),
-        "total_packages":        int(df.groupby(["group_id","artifact_id"]).ngroups),
+        "total_packages":        int(df.groupby(["group_id", "artifact_id"]).ngroups),
         "critical_count":        int((df["severity"] == "CRITICAL").sum()),
         "high_count":            int((df["severity"] == "HIGH").sum()),
         "medium_count":          int((df["severity"] == "MEDIUM").sum()),
         "low_count":             int((df["severity"] == "LOW").sum()),
     }
     try:
-        with open(f"{out_dir}/metadata.json", "w") as fh:
+        with open(f"{out_dir}/{eco_lower}/metadata.json", "w") as fh:
             json.dump(metadata, fh, indent=2)
     except OSError as e:
         raise RuntimeError(f"Failed to write metadata.json: {e}") from e
@@ -301,12 +318,13 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
 
 # ── Stage 4: Upload to S3 ─────────────────────────────────────────────────────
 
-def upload_to_s3(out_dir: str = "/tmp"):
+def upload_to_s3(ecosystem: str = "Maven", out_dir: str = "/tmp"):
     s3 = boto3.client("s3", region_name=AWS_REGION)
+    eco_lower = ecosystem.lower()
     files = [
-        (f"{out_dir}/csv/vulnerability_summary.csv",  "csv/vulnerability_summary.csv",  "text/csv"),
-        (f"{out_dir}/csv/vulnerability_detailed.csv", "csv/vulnerability_detailed.csv", "text/csv"),
-        (f"{out_dir}/metadata.json",                  "metadata.json",                  "application/json"),
+        (f"{out_dir}/{eco_lower}/csv/vulnerability_summary.csv",  f"{eco_lower}/csv/vulnerability_summary.csv",  "text/csv"),
+        (f"{out_dir}/{eco_lower}/csv/vulnerability_detailed.csv", f"{eco_lower}/csv/vulnerability_detailed.csv", "text/csv"),
+        (f"{out_dir}/{eco_lower}/metadata.json",                  f"{eco_lower}/metadata.json",                  "application/json"),
     ]
     for local, key, content_type in files:
         try:
@@ -341,15 +359,22 @@ def invalidate_cloudfront():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    try:
-        zip_buf  = download_osv()
-        df       = parse_osv(zip_buf)
-        generate_outputs(df)
-        upload_to_s3()
-        invalidate_cloudfront()
-    except RuntimeError as e:
-        log.error(f"Pipeline failed: {e}")
-        raise
+    errors = []
+    for ecosystem in ("Maven", "PyPI", "npm"):
+        try:
+            zip_buf = download_osv(ecosystem)
+            df      = parse_osv(zip_buf, ecosystem)
+            generate_outputs(df, ecosystem)
+            upload_to_s3(ecosystem)
+            log.info(f"{ecosystem} pipeline complete ✓")
+        except RuntimeError as e:
+            log.error(f"{ecosystem} pipeline failed: {e}")
+            errors.append(f"{ecosystem}: {e}")
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
+
+    invalidate_cloudfront()
     log.info("Pipeline complete ✓")
 
 

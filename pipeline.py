@@ -22,6 +22,7 @@ import zipfile
 from datetime import datetime, timezone
 
 import boto3
+import botocore.exceptions
 import pandas as pd
 import requests
 
@@ -88,8 +89,15 @@ def extract_cve(record: dict) -> str:
 
 def download_osv() -> io.BytesIO:
     log.info("Downloading OSV Maven bulk dataset …")
-    resp = requests.get(OSV_URL, stream=True, timeout=600)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(OSV_URL, stream=True, timeout=600)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"Timed out downloading OSV dataset from {OSV_URL}")
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"Network error downloading OSV dataset: {e}") from e
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.response.status_code} downloading OSV dataset: {e}") from e
     data = resp.content
     log.info(f"Downloaded {len(data)/1_048_576:.1f} MB")
     return io.BytesIO(data)
@@ -99,7 +107,11 @@ def download_osv() -> io.BytesIO:
 
 def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
     rows = []
-    with zipfile.ZipFile(zip_buf) as zf:
+    try:
+        zf_ctx = zipfile.ZipFile(zip_buf)
+    except zipfile.BadZipFile as e:
+        raise RuntimeError("Downloaded OSV data is not a valid ZIP archive") from e
+    with zf_ctx as zf:
         names = zf.namelist()
         log.info(f"Parsing {len(names):,} OSV records …")
         for name in names:
@@ -152,6 +164,8 @@ def parse_osv(zip_buf: io.BytesIO) -> pd.DataFrame:
                 })
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("No Maven vulnerability records found in OSV dataset")
     log.info(f"Parsed {len(df):,} vulnerability-package rows (pre-dedup)")
 
     # A single OSV record can have multiple affected entries for the same package
@@ -192,14 +206,20 @@ def _max_version(versions: list) -> str:
 # ── Stage 3: Generate outputs ─────────────────────────────────────────────────
 
 def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
-    os.makedirs(f"{out_dir}/csv", exist_ok=True)
+    try:
+        os.makedirs(f"{out_dir}/csv", exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"Cannot create output directory {out_dir}/csv: {e}") from e
 
     # ── Detailed CSV
     detailed = df[[
         "group_id", "artifact_id", "cve", "cvss_score", "severity",
         "published_date", "summary", "num_affected_versions", "fixed_version"
     ]].rename(columns={"group_id": "publisher", "artifact_id": "product"})
-    detailed.to_csv(f"{out_dir}/csv/vulnerability_detailed.csv", index=False)
+    try:
+        detailed.to_csv(f"{out_dir}/csv/vulnerability_detailed.csv", index=False)
+    except OSError as e:
+        raise RuntimeError(f"Failed to write detailed CSV: {e}") from e
     log.info("Detailed CSV written")
 
     # ── Summary CSV
@@ -247,13 +267,16 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
         axis=1,
     )
     summary = summary.sort_values("risk_score", ascending=False)
-    summary[[
-        "publisher", "product", "risk_score", "total_vulnerabilities",
-        "recent_cves", "last_year_cves", "prev_year_cves", "trend",
-        "critical", "high", "medium", "low",
-        "avg_cvss", "latest_vuln_date", "total_affected_versions",
-        "min_safe_version", "unfixed_cves",
-    ]].to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
+    try:
+        summary[[
+            "publisher", "product", "risk_score", "total_vulnerabilities",
+            "recent_cves", "last_year_cves", "prev_year_cves", "trend",
+            "critical", "high", "medium", "low",
+            "avg_cvss", "latest_vuln_date", "total_affected_versions",
+            "min_safe_version", "unfixed_cves",
+        ]].to_csv(f"{out_dir}/csv/vulnerability_summary.csv", index=False)
+    except OSError as e:
+        raise RuntimeError(f"Failed to write summary CSV: {e}") from e
     log.info("Summary CSV written")
 
     # ── Metadata JSON
@@ -266,8 +289,11 @@ def generate_outputs(df: pd.DataFrame, out_dir: str = "/tmp") -> dict:
         "medium_count":          int((df["severity"] == "MEDIUM").sum()),
         "low_count":             int((df["severity"] == "LOW").sum()),
     }
-    with open(f"{out_dir}/metadata.json", "w") as fh:
-        json.dump(metadata, fh, indent=2)
+    try:
+        with open(f"{out_dir}/metadata.json", "w") as fh:
+            json.dump(metadata, fh, indent=2)
+    except OSError as e:
+        raise RuntimeError(f"Failed to write metadata.json: {e}") from e
     log.info(f"Metadata: {metadata}")
 
     return metadata
@@ -283,10 +309,15 @@ def upload_to_s3(out_dir: str = "/tmp"):
         (f"{out_dir}/metadata.json",                  "metadata.json",                  "application/json"),
     ]
     for local, key, content_type in files:
-        s3.upload_file(
-            local, S3_BUCKET, key,
-            ExtraArgs={"ContentType": content_type, "CacheControl": "max-age=3600"},
-        )
+        try:
+            s3.upload_file(
+                local, S3_BUCKET, key,
+                ExtraArgs={"ContentType": content_type, "CacheControl": "max-age=3600"},
+            )
+        except botocore.exceptions.NoCredentialsError:
+            raise RuntimeError("No AWS credentials found — cannot upload to S3")
+        except botocore.exceptions.ClientError as e:
+            raise RuntimeError(f"S3 upload failed for {key}: {e}") from e
         log.info(f"  ↑ s3://{S3_BUCKET}/{key}")
 
 
@@ -294,30 +325,41 @@ def invalidate_cloudfront():
     if not CF_ID:
         return
     cf = boto3.client("cloudfront", region_name="us-east-1")
-    cf.create_invalidation(
-        DistributionId=CF_ID,
-        InvalidationBatch={
-            "Paths": {"Quantity": 1, "Items": ["/*"]},
-            "CallerReference": str(datetime.now(timezone.utc).timestamp()),
-        },
-    )
+    try:
+        cf.create_invalidation(
+            DistributionId=CF_ID,
+            InvalidationBatch={
+                "Paths": {"Quantity": 1, "Items": ["/*"]},
+                "CallerReference": str(datetime.now(timezone.utc).timestamp()),
+            },
+        )
+    except botocore.exceptions.ClientError as e:
+        raise RuntimeError(f"CloudFront invalidation failed for {CF_ID}: {e}") from e
     log.info(f"CloudFront invalidation created for {CF_ID}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    zip_buf  = download_osv()
-    df       = parse_osv(zip_buf)
-    metadata = generate_outputs(df)
-    upload_to_s3()
-    invalidate_cloudfront()
+    try:
+        zip_buf  = download_osv()
+        df       = parse_osv(zip_buf)
+        generate_outputs(df)
+        upload_to_s3()
+        invalidate_cloudfront()
+    except RuntimeError as e:
+        log.error(f"Pipeline failed: {e}")
+        raise
     log.info("Pipeline complete ✓")
 
 
 def handler(event, context):
     """AWS Lambda entry point."""
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.error(f"Unhandled error in Lambda handler: {e}")
+        return {"statusCode": 500, "body": str(e)}
     return {"statusCode": 200, "body": "Pipeline complete"}
 
 

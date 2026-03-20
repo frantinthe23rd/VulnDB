@@ -3,3 +3,8 @@ cvss>=2.6
 packaging>=24.0
 pandas>=2.2
 requests>=2.31
+
+# Test dependencies
+pytest>=8.0
+pytest-mock>=3.14
+requests-mock>=1.12

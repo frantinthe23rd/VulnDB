@@ -7,6 +7,8 @@ on:
       - 'pipeline.py'
       - 'Dockerfile'
       - 'requirements.txt'
+      - 'pytest.ini'
+      - 'tests/**'
   workflow_dispatch:
 
 jobs:

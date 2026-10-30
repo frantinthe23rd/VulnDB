@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta name="referrer" content="no-referrer">
+    <title>Third-Party Exposure — VulnDB</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg:      #0f172a;
+            --surface: #1e293b;
+            --border:  #334155;
+            --accent:  #38bdf8;
+            --text:    #e2e8f0;
+            --muted:   #94a3b8;
+            --crit:    #ef4444;
+            --high:    #f97316;
+            --med:     #eab308;
+            --low:     #22c55e;
+        }
+
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        header {
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 0 2vw; display: flex; align-items: center; justify-content: space-between;
+            height: 60px; position: sticky; top: 0; z-index: 100; gap: 16px;
+        }
+        header h1 { font-size: 1.25rem; color: var(--accent); letter-spacing: .5px; white-space: nowrap; }
+        header h1 a { color: inherit; text-decoration: none; }
+        .nav { display: flex; gap: 20px; list-style: none; }
+        .nav a { color: var(--muted); text-decoration: none; font-size: .9rem; transition: color .2s; white-space: nowrap; }
+        .nav a:hover { color: var(--text); }
+
+        main { width: 100%; max-width: 1100px; margin: 0 auto; padding: 40px 16px 60px; }
+
+        .hero { margin-bottom: 32px; }
+        .hero h2 { font-size: 1.8rem; margin-bottom: 10px; }
+        .hero p { color: var(--muted); line-height: 1.7; max-width: 760px; }
+        .hero p + p { margin-top: 8px; }
+
+        .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin-bottom: 18px; }
+        .panel h3 { font-size: 1.05rem; color: var(--accent); margin-bottom: 12px; font-weight: 600; }
+        .panel-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+        .panel-head h3 { margin: 0; }
+        .muted { color: var(--muted); font-size: .88rem; line-height: 1.6; }
+
+        table.scans { width: 100%; border-collapse: collapse; font-size: .9rem; }
+        table.scans th { text-align: left; color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: uppercase; letter-spacing: .5px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+        table.scans td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        table.scans tr:last-child td { border-bottom: 0; }
+        table.scans tbody tr { cursor: pointer; }
+        table.scans tbody tr:hover td, table.scans tbody tr.active td { background: rgba(56,189,248,.06); }
+        .num, table.scans th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .site { font-family: ui-monospace, Consolas, monospace; font-size: .82rem; word-break: break-all; }
+        .site button { all: unset; cursor: pointer; color: var(--text); }
+        .site button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .dl a { color: var(--muted); font-size: .78rem; margin-right: 8px; }
+        .dl a:hover { color: var(--text); }
+
+        .badge { display: inline-block; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 2px 8px; border-radius: 4px; border: 1px solid currentColor; white-space: nowrap; }
+        .r-critical { color: var(--crit); } .r-high { color: var(--high); } .r-medium { color: var(--med); } .r-low { color: var(--low); } .r-none { color: var(--muted); }
+
+        .file-btn { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--accent); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer; background: var(--bg); }
+        .file-btn:hover { border-color: var(--accent); }
+        .file-btn input { display: none; }
+
+        pre.cmd { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: .8rem; overflow-x: auto; margin: 8px 0; color: var(--text); }
+
+        #report-view { scroll-margin-top: 76px; }
+        .view-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 28px 0 12px; }
+        .view-bar h3 { font-size: 1.05rem; color: var(--accent); }
+        .view-bar button { font: inherit; font-size: .85rem; color: var(--muted); background: none; border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+        .view-bar button:hover { color: var(--text); border-color: var(--muted); }
+        .error { color: var(--crit); font-size: .9rem; }
+
+        footer { text-align: center; padding: 32px 0 24px; color: var(--muted); font-size: .8rem; }
+        footer a { color: var(--muted); }
+
+        @media (max-width: 720px) {
+            .hide-sm { display: none; }
+            .nav { gap: 14px; }
+            .hero h2 { font-size: 1.4rem; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1><a href="index.html">VulnDB</a></h1>
+    <nav>
+        <ul class="nav">
+            <li><a href="index.html">← Home</a></li>
+            <li><a href="about.html#exposure">Methodology</a></li>
+            <li><a href="about.html">About</a></li>
+        </ul>
+    </nav>
+</header>
+
+<main>
+    <div class="hero">
+        <h2>Third-Party Exposure</h2>
+        <p>Which third-party services a web page loads or talks to, each rated by what that vendor could do to the page's visitors if it were compromised. Each scan loads the page in Chromium, records every request and who made it, and rates the result. It maps attack surface; it does not detect whether any vendor is compromised.</p>
+        <p>Scans are run by <code>tpscan</code> from this repository, before any consent choice and again after accepting and after rejecting cookies.</p>
+    </div>
+
+    <section class="panel" aria-labelledby="scans-title">
+        <div class="panel-head">
+            <h3 id="scans-title">Published scans</h3>
+            <label class="file-btn">Open a report file
+                <input type="file" id="file-input" accept=".json,application/json">
+            </label>
+        </div>
+        <div id="scans"><p class="muted">Loading…</p></div>
+    </section>
+
+    <div id="report-view" hidden>
+        <div class="view-bar">
+            <h3 id="view-title">Report</h3>
+            <button type="button" id="close-view">Close report</button>
+        </div>
+        <div id="report"></div>
+    </div>
+</main>
+
+<footer>
+    Exposure reports from <code>tpscan</code> &mdash; <a href="about.html#exposure">methodology and limitations</a>
+</footer>
+
+<script>
+(function () {
+    'use strict';
+    var SLUG = /^[a-z0-9._-]+$/;
+    var RATINGS = ['critical', 'high', 'medium', 'low', 'none'];
+    var scansEl = document.getElementById('scans');
+    var viewEl = document.getElementById('report-view');
+    var reportEl = document.getElementById('report');
+    var titleEl = document.getElementById('view-title');
+    var index = null;
+
+    function el(tag, props) {
+        var node = document.createElement(tag);
+        for (var k in (props || {})) {
+            if (k === 'text') node.textContent = props[k];
+            else if (k === 'cls') node.className = props[k];
+            else node.setAttribute(k, props[k]);
+        }
+        for (var i = 2; i < arguments.length; i++) {
+            var c = arguments[i];
+            if (c === null || c === undefined) continue;
+            (Array.isArray(c) ? c : [c]).forEach(function (x) { if (x) node.appendChild(typeof x === 'string' ? document.createTextNode(x) : x); });
+        }
+        return node;
+    }
+
+    function badge(r) {
+        var rating = RATINGS.indexOf(r) === -1 ? 'none' : r;
+        return el('span', { cls: 'badge r-' + rating, text: rating === 'none' ? 'none' : rating });
+    }
+
+    function fmtDate(iso) {
+        var d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+    }
+
+    // The renderer is published next to this page; when previewing from a checkout, fall back to the source copy.
+    function loadRenderer() {
+        return new Promise(function (resolve, reject) {
+            if (window.TPScanReport) return resolve();
+            var sources = ['exposure-renderer.js', 'tpscan/assets/renderer.js'];
+            (function next() {
+                var src = sources.shift();
+                if (!src) return reject(new Error('Report renderer could not be loaded.'));
+                var s = document.createElement('script');
+                s.src = src;
+                s.onload = function () { window.TPScanReport ? resolve() : next(); };
+                s.onerror = next;
+                document.head.appendChild(s);
+            })();
+        });
+    }
+
+    function looksLikeReport(r) {
+        return r && r.scan && r.page && r.summary && r.consent && Array.isArray(r.items) && Array.isArray(r.vendors) && Array.isArray(r.limitations);
+    }
+
+    function show(report, title) {
+        return loadRenderer().then(function () {
+            titleEl.textContent = title;
+            window.TPScanReport.render(reportEl, report);
+            viewEl.hidden = false;
+            viewEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }
+
+    function showError(msg) {
+        titleEl.textContent = 'Report';
+        reportEl.replaceChildren(el('p', { cls: 'error', text: msg }));
+        viewEl.hidden = false;
+    }
+
+    function openSlug(slug) {
+        if (!SLUG.test(slug)) return;
+        var rows = scansEl.querySelectorAll('tbody tr');
+        Array.prototype.forEach.call(rows, function (tr) { tr.classList.toggle('active', tr.dataset.slug === slug); });
+        fetch('exposure/' + slug + '/report.json', { cache: 'no-cache' })
+            .then(function (res) { if (!res.ok) throw new Error('Report not found (' + res.status + ').'); return res.json(); })
+            .then(function (r) {
+                if (!looksLikeReport(r)) throw new Error('That file is not a tpscan report.');
+                return show(r, 'Report');
+            })
+            .catch(function (e) { showError(e.message); });
+    }
+
+    function renderIndex() {
+        var scans = (index && Array.isArray(index.scans) ? index.scans : []).filter(function (s) { return s && SLUG.test(s.slug); });
+        if (!scans.length) {
+            scansEl.replaceChildren(
+                el('p', { cls: 'muted', text: 'No scans have been published yet. Add URLs to tpscan/sites.txt, or run the "Third-party exposure scan" workflow with a URL. To scan locally and view the result here:' }),
+                el('pre', { cls: 'cmd', text: 'cd tpscan && npm ci && npm run build\nnode dist/src/cli.js https://example.co.uk --format json,html' }),
+                el('p', { cls: 'muted', text: 'Then use "Open a report file" with the report.json it writes. The file stays in your browser.' }));
+            return;
+        }
+        var tbody = el('tbody');
+        scans.forEach(function (s) {
+            var tr = el('tr', { 'data-slug': s.slug },
+                el('td', null, badge(s.rating)),
+                el('td', { cls: 'site' }, el('button', { type: 'button', text: s.finalUrl || s.url })),
+                el('td', { cls: 'num', text: String(s.vendors) }),
+                el('td', { cls: 'num hide-sm', text: s.sriCoverage ? s.sriCoverage['with'] + ' / ' + s.sriCoverage.of : '' }),
+                el('td', { cls: 'num hide-sm', text: fmtDate(s.scannedAt) }),
+                el('td', { cls: 'dl hide-sm' }, (s.formats || []).filter(function (f) { return /^(json|html|csv)$/.test(f); }).map(function (f) {
+                    return el('a', { href: 'exposure/' + s.slug + '/report.' + f, download: s.slug + '.' + f, text: f.toUpperCase() });
+                })));
+            tr.addEventListener('click', function (e) {
+                if (e.target.closest('a')) return;
+                history.replaceState(null, '', '#scan=' + s.slug);
+                openSlug(s.slug);
+            });
+            tbody.appendChild(tr);
+        });
+        scansEl.replaceChildren(el('table', { cls: 'scans' },
+            el('thead', null, el('tr', null,
+                el('th', { text: 'Exposure' }), el('th', { text: 'Page' }), el('th', { cls: 'num', text: 'Vendors' }),
+                el('th', { cls: 'num hide-sm', text: 'SRI' }), el('th', { cls: 'num hide-sm', text: 'Scanned' }),
+                el('th', { cls: 'hide-sm', text: 'Download' }))),
+            tbody));
+    }
+
+    fetch('exposure/index.json', { cache: 'no-cache' })
+        .then(function (res) { return res.ok ? res.json() : { scans: [] }; })
+        .catch(function () { return { scans: [] }; })
+        .then(function (data) {
+            index = data;
+            renderIndex();
+            var m = location.hash.match(/^#scan=([a-z0-9._-]+)$/);
+            if (m) openSlug(m[1]);
+        });
+
+    document.getElementById('file-input').addEventListener('change', function (e) {
+        var file = e.target.files && e.target.files[0];
+        if (!file) return;
+        file.text().then(function (text) {
+            var r;
+            try { r = JSON.parse(text); } catch (err) { throw new Error('That file is not valid JSON.'); }
+            if (!looksLikeReport(r)) throw new Error('That file is not a tpscan report.');
+            history.replaceState(null, '', location.pathname);
+            return show(r, 'Report from ' + file.name);
+        }).catch(function (err) { showError(err.message); });
+        e.target.value = '';
+    });
+
+    document.getElementById('close-view').addEventListener('click', function () {
+        viewEl.hidden = true;
+        reportEl.replaceChildren();
+        history.replaceState(null, '', location.pathname);
+        Array.prototype.forEach.call(scansEl.querySelectorAll('tr.active'), function (tr) { tr.classList.remove('active'); });
+    });
+})();
+</script>
+</body>
+</html>

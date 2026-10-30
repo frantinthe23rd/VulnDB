@@ -215,6 +215,39 @@
         <li><strong>Fixed version lag</strong> — Fixed version data may lag behind actual patch releases by days or weeks depending on how quickly maintainers update OSV records.</li>
     </ul>
 
+    <h2 id="exposure">Third-Party Exposure</h2>
+    <p>
+        The <a href="exposure.html">exposure page</a> shows reports from <code>tpscan</code> (in <code>tpscan/</code> in this repository).
+        It loads a page in Chromium, records every request the page and its frames and workers make, works out which script loaded
+        which, and rates each third-party item by one question: <strong>if this vendor were compromised tomorrow, what could it do to
+        this page's visitors?</strong> It maps attack surface. It does not detect whether any vendor is compromised.
+    </p>
+    <p>
+        Each scan runs one fresh browser profile per consent state: it clicks the site's "accept all" control in one pass and
+        "reject all" in another (known consent-platform buttons first, then button text), scrolls the page and focuses a form field so
+        lazy-loaded tags fire, and records what loaded before any choice and after each one.
+    </p>
+    <table>
+        <thead><tr><th>Rating</th><th>When</th></tr></thead>
+        <tbody>
+            <tr><td><span class="badge badge-crit">CRITICAL</span></td><td>Third-party script in the top frame, without Subresource Integrity (SRI), on a page with a password, payment or login field. It can read and change credentials, sessions and transactions.</td></tr>
+            <tr><td><span class="badge badge-high">HIGH</span></td><td>Third-party script in the top frame without SRI; any tag manager; a script loaded by another third-party script; a third-party script imported into a service worker.</td></tr>
+            <tr><td><span class="badge badge-med">MEDIUM</span></td><td>Third-party script pinned with SRI; a third-party iframe with weakened isolation (no sandbox, or scripts plus same-origin, or permissions such as payment, camera or clipboard); any data sent to a third party (fetch, XHR, beacon, WebSocket).</td></tr>
+            <tr><td><span class="badge badge-low">LOW</span></td><td>Sandboxed iframes, images, fonts and stylesheets.</td></tr>
+        </tbody>
+    </table>
+    <p>
+        The first matching rule sets the rating; every matching rule is listed as a reason. A page's rating is its highest item rating.
+        The rules live in <code>tpscan/assets/rules.yaml</code>. Each report also covers the page's Content-Security-Policy, SRI coverage
+        and third-party cookies.
+    </p>
+    <div class="card warn">
+        <strong>A clean report is not "no exposure".</strong> Calls a site's backend makes to other services never reach the browser.
+        A compromised npm package compiled into the site's own JavaScript is served from the site's domain and looks first-party.
+        Logged-in areas and later steps of a flow are not visited, vendors can serve headless browsers different code, and any vendor can
+        change its code after the scan. Every report lists these limits.
+    </div>
+
     <h2>Infrastructure</h2>
     <table>
         <thead><tr><th>Component</th><th>Technology</th><th>Purpose</th></tr></thead>
@@ -225,6 +258,7 @@
             <tr><td><strong>Schedule</strong></td><td>Amazon EventBridge Scheduler</td><td>Triggers Lambda every Monday 06:00 UTC</td></tr>
             <tr><td><strong>Storage</strong></td><td>Amazon S3</td><td>Hosts CSV outputs, metadata, and this website (under <code>maven/</code>, <code>pypi/</code>, <code>npm/</code> prefixes)</td></tr>
             <tr><td><strong>CDN</strong></td><td>Amazon CloudFront</td><td>HTTPS delivery and edge caching</td></tr>
+            <tr><td><strong>Exposure scans</strong></td><td>tpscan · Playwright Chromium in Docker (GitHub Actions)</td><td>Scans the pages in <code>tpscan/sites.txt</code> weekly or on demand and publishes reports under <code>exposure/</code></td></tr>
             <tr><td><strong>CI/CD</strong></td><td>GitHub Actions</td><td>Builds and deploys Lambda image on code push; deploys HTML on content change</td></tr>
         </tbody>
     </table>

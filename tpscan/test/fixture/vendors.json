@@ -1,0 +1,32 @@
+{
+ "domains": {
+  "vendor-a.test": {
+   "vendor": "ExampleRUM",
+   "category": "rum-performance"
+  },
+  "vendor-b.test": {
+   "vendor": "ExamplePixel",
+   "category": "analytics"
+  },
+  "vendor-c.test": {
+   "vendor": "ExampleTags",
+   "category": "tag-manager"
+  },
+  "vendor-d.test": {
+   "vendor": "ExampleCDN",
+   "category": "cdn-library"
+  },
+  "vendor-e.test": {
+   "vendor": "ExampleChat",
+   "category": "chat-support"
+  },
+  "vendor-f.test": {
+   "vendor": "ExampleAds",
+   "category": "advertising"
+  },
+  "cname-vendor.test": {
+   "vendor": "ExampleCloaked",
+   "category": "analytics"
+  }
+ }
+}

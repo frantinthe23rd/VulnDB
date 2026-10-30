@@ -1,4 +1,1 @@
 VulnDBProject.code-workspace
-
-# Local previews of published exposure reports (the real ones live in S3)
-/exposure/

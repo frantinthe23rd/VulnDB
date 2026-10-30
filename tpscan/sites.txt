@@ -1,0 +1,6 @@
+# URLs the scheduled "Third-party exposure scan" workflow scans and publishes to the
+# VulnDB site's exposure page. One per line; # starts a comment.
+#
+# Only add sites you are entitled to assess: your own, or ones your organisation's
+# policy allows you to scan. Scans are passive (one normal page visit per consent
+# state), but they still run from GitHub's network under this repository's name.

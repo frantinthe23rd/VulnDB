@@ -1,0 +1,113 @@
+name: Third-party exposure scan
+
+# Tests tpscan on every change to it. On a schedule or by hand, scans the pages in
+# tpscan/sites.txt (or the URLs given) inside the tpscan container and publishes
+# the reports under exposure/ on the VulnDB site.
+
+on:
+  pull_request:
+    paths:
+      - 'tpscan/**'
+      - '.github/workflows/tpscan.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'tpscan/**'
+      - '.github/workflows/tpscan.yml'
+  schedule:
+    - cron: '23 6 * * 1'   # Mondays, after the OSV pipeline
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'URLs to scan, separated by spaces or new lines. Leave empty to scan tpscan/sites.txt.'
+        required: false
+        default: ''
+      consent:
+        description: 'Consent passes'
+        type: choice
+        options: [both, accept, reject, none]
+        default: both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tpscan-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright:v1.63.0-noble
+    defaults:
+      run:
+        working-directory: tpscan
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm test
+
+  scan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect URLs
+        id: urls
+        env:
+          INPUT_URLS: ${{ github.event.inputs.urls }}
+        run: |
+          mkdir -p scan-in
+          if [ -n "$INPUT_URLS" ]; then
+            set -f  # split on whitespace, but don't glob '?' or '*' in URLs
+            printf '%s\n' $INPUT_URLS > scan-in/urls.txt
+            set +f
+          else
+            grep -vE '^\s*(#|$)' tpscan/sites.txt > scan-in/urls.txt || true
+          fi
+          count=$(grep -cvE '^\s*$' scan-in/urls.txt || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "$count URL(s) to scan"
+
+      - name: Build tpscan image
+        if: steps.urls.outputs.count != '0'
+        run: docker build -t tpscan tpscan
+
+      - name: Configure AWS credentials
+        if: steps.urls.outputs.count != '0'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Scan
+        if: steps.urls.outputs.count != '0'
+        env:
+          CONSENT: ${{ github.event.inputs.consent || 'both' }}
+        run: |
+          mkdir -p scan-out && chmod 777 scan-out
+          # Hostile workload: no AWS credentials or repo inside, non-root, no extra privileges,
+          # and --block-private so pages can't steer the browser at the runner's metadata service.
+          docker run --rm \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "$PWD/scan-in:/in:ro" -v "$PWD/scan-out:/out" \
+            tpscan --urls /in/urls.txt --out /out --format json,html,csv \
+              --consent "$CONSENT" --block-private \
+            || echo "::warning::Some scans failed; publishing the rest."
+
+      - name: Publish to the site
+        if: steps.urls.outputs.count != '0'
+        run: |
+          mkdir -p published && chmod 777 published
+          # Keep earlier reports so the index lists every published scan.
+          aws s3 sync "s3://${{ vars.S3_BUCKET }}/exposure/" published/ --exclude index.json
+          cp -R scan-out/. published/
+          docker run --rm -v "$PWD/published:/out" --entrypoint node tpscan /app/dist/src/indexer.js /out
+          aws s3 sync published/ "s3://${{ vars.S3_BUCKET }}/exposure/" --cache-control "max-age=300"
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.VULNDB_CF_DISTRIBUTION_ID }} \
+            --paths "/exposure/*"
